@@ -1,0 +1,1805 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Print Profit – Gestão de Impressão 3D</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+  signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged,
+  sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, collection,
+  getDocs, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ── FIREBASE CONFIG ──
+const firebaseConfig = {
+  apiKey: "AIzaSyCCZ6dKQu1vPkq3DHQkafSWVUZ57klrIe0",
+  authDomain: "print-profit.firebaseapp.com",
+  projectId: "print-profit",
+  storageBucket: "print-profit.firebasestorage.app",
+  messagingSenderId: "429317361928",
+  appId: "1:429317361928:web:aaf866b87544c134f65cbd"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+const googleProvider = new GoogleAuthProvider();
+
+// ── ESTADO GLOBAL ──
+let currentUser = null;
+let DB = {
+  filamentos: [], insumos: [], impressoras: [], trabalhos: [],
+  config: {
+    moeda: 'EUR', impostoNome: 'IVA', impostoTaxa: 23,
+    kwh: 0.22, maoDeObra: 5, margemPadrao: 40, nomeNegocio: 'Minha Impressora 3D'
+  }
+};
+
+const MOEDAS = {
+  EUR: { simbolo: '€', nome: 'EUR' },
+  BRL: { simbolo: 'R$', nome: 'BRL' },
+  USD: { simbolo: '$', nome: 'USD' }
+};
+
+let currentPeriod = 'mes';
+let insumoFilter = '';
+let editTrabalhoId = null;
+let taxToggleOn = false;
+let calcTaxOn = false;
+let dashChartInstance = null;
+let filamentosRows = [];
+let insumosRows = [];
+
+// ── FIRESTORE HELPERS ──
+function userCol(col) {
+  return collection(db, 'users', currentUser.uid, col);
+}
+function userDoc(col, id) {
+  return doc(db, 'users', currentUser.uid, col, id);
+}
+function configDoc() {
+  return doc(db, 'users', currentUser.uid, 'config', 'main');
+}
+
+async function saveCollection(colName, items) {
+  const col = userCol(colName);
+  const existing = await getDocs(col);
+  const deletions = existing.docs.map(d => deleteDoc(d.ref));
+  await Promise.all(deletions);
+  const saves = items.map(item => setDoc(userDoc(colName, item.id), item));
+  await Promise.all(saves);
+}
+
+async function loadCollection(colName) {
+  const snap = await getDocs(userCol(colName));
+  return snap.docs.map(d => d.data());
+}
+
+async function saveDB() {
+  try {
+    await Promise.all([
+      saveCollection('filamentos', DB.filamentos),
+      saveCollection('insumos', DB.insumos),
+      saveCollection('impressoras', DB.impressoras),
+      saveCollection('trabalhos', DB.trabalhos),
+      setDoc(configDoc(), DB.config)
+    ]);
+  } catch(e) { console.error('Erro ao salvar:', e); toast('Erro ao salvar dados','error'); }
+}
+
+async function saveItem(colName, item) {
+  try {
+    await setDoc(userDoc(colName, item.id), item);
+  } catch(e) { console.error(e); toast('Erro ao salvar','error'); }
+}
+
+async function deleteItem(colName, id) {
+  try {
+    await deleteDoc(userDoc(colName, id));
+  } catch(e) { console.error(e); toast('Erro ao deletar','error'); }
+}
+
+async function saveConfig() {
+  try { await setDoc(configDoc(), DB.config); } catch(e) { console.error(e); }
+}
+
+async function loadDB() {
+  showLoading(true);
+  try {
+    const [fils, ins, imps, trabs, cfgSnap] = await Promise.all([
+      loadCollection('filamentos'),
+      loadCollection('insumos'),
+      loadCollection('impressoras'),
+      loadCollection('trabalhos'),
+      getDoc(configDoc())
+    ]);
+    DB.filamentos = fils;
+    DB.insumos = ins;
+    DB.impressoras = imps;
+    DB.trabalhos = trabs;
+    if (cfgSnap.exists()) DB.config = { ...DB.config, ...cfgSnap.data() };
+
+    // Dados de exemplo se vazio
+    if (!DB.filamentos.length) await seedData();
+  } catch(e) { console.error('Erro ao carregar:', e); }
+  showLoading(false);
+}
+
+async function seedData() {
+  DB.filamentos = [
+    { id: uid(), nome:'PLA Basic White', marca:'Bambu Lab', tipo:'PLA', cor:'Branco',
+      pesoCarretel:1000, preco:22, custoPorGrama:0.022, estoque:3, estoqueMin:1,
+      fornecedor:'Bambu Lab', dataCompra:'2024-01-10' },
+    { id: uid(), nome:'PETG Black', marca:'eSUN', tipo:'PETG', cor:'Preto',
+      pesoCarretel:1000, preco:19, custoPorGrama:0.019, estoque:1, estoqueMin:1,
+      fornecedor:'eSUN', dataCompra:'2024-02-01' }
+  ];
+  DB.impressoras = [
+    { id: uid(), nome:'Bambu Lab P2S', preco:599, vidaUtil:5000, potencia:350,
+      depreciacaoPorH:0.1198, custEletricoH:0.077 }
+  ];
+  DB.insumos = [
+    { id: uid(), nome:'Caixa Papelão Pequena', categoria:'Embalagem', unidade:'un',
+      qtdComprada:50, precoTotal:15, custoUn:0.30, estoque:45, estoqueMin:10,
+      fornecedor:'Amazon', dataCompra:'2024-01-15', obs:'' },
+    { id: uid(), nome:'Argola para Chaveiro', categoria:'Componentes / Acessórios', unidade:'un',
+      qtdComprada:100, precoTotal:5, custoUn:0.05, estoque:80, estoqueMin:20,
+      fornecedor:'AliExpress', dataCompra:'2024-01-20', obs:'' }
+  ];
+  await saveDB();
+}
+
+// ── UTILS ──
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+
+function fmt(val) {
+  const m = MOEDAS[DB.config.moeda] || MOEDAS.EUR;
+  const n = parseFloat(val) || 0;
+  if (DB.config.moeda === 'USD') {
+    return m.simbolo + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  return m.simbolo + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+function fmtG(val) {
+  const m = MOEDAS[DB.config.moeda] || MOEDAS.EUR;
+  return m.simbolo + (parseFloat(val)||0).toFixed(4);
+}
+
+function showLoading(show) {
+  document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
+}
+
+function toast(msg, type='success') {
+  const t = document.getElementById('toast');
+  const icons = { success:'✅', error:'❌', warn:'⚠️', info:'ℹ️' };
+  document.getElementById('toastMsg').innerHTML = (icons[type]||'') + ' ' + msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+// ── AUTH STATE ──
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    currentUser = user;
+    document.getElementById('authScreen').style.display = 'none';
+    document.getElementById('appScreen').style.display = 'flex';
+    document.getElementById('userEmail').textContent = user.displayName || user.email;
+    document.getElementById('userAvatar').textContent = (user.displayName || user.email)[0].toUpperCase();
+    await loadDB();
+    updateGlobalCurrency();
+    updateTaxLabels();
+    goTo('dashboard');
+  } else {
+    currentUser = null;
+    document.getElementById('authScreen').style.display = 'flex';
+    document.getElementById('appScreen').style.display = 'none';
+    showAuthForm('login');
+  }
+});
+
+// ── AUTH ACTIONS ──
+window.authLogin = async () => {
+  const email = document.getElementById('authEmail').value.trim();
+  const pass = document.getElementById('authPass').value;
+  if (!email || !pass) { showAuthError('Preencha email e senha'); return; }
+  try {
+    setAuthLoading(true);
+    await signInWithEmailAndPassword(auth, email, pass);
+  } catch(e) {
+    setAuthLoading(false);
+    showAuthError(friendlyAuthError(e.code));
+  }
+};
+
+window.authRegister = async () => {
+  const email = document.getElementById('authEmail').value.trim();
+  const pass = document.getElementById('authPass').value;
+  const pass2 = document.getElementById('authPass2').value;
+  if (!email || !pass) { showAuthError('Preencha todos os campos'); return; }
+  if (pass !== pass2) { showAuthError('As senhas não coincidem'); return; }
+  if (pass.length < 6) { showAuthError('Senha deve ter pelo menos 6 caracteres'); return; }
+  try {
+    setAuthLoading(true);
+    await createUserWithEmailAndPassword(auth, email, pass);
+  } catch(e) {
+    setAuthLoading(false);
+    showAuthError(friendlyAuthError(e.code));
+  }
+};
+
+window.authGoogle = async () => {
+  try {
+    setAuthLoading(true);
+    await signInWithPopup(auth, googleProvider);
+  } catch(e) {
+    setAuthLoading(false);
+    showAuthError(friendlyAuthError(e.code));
+  }
+};
+
+window.authResetPassword = async () => {
+  const email = document.getElementById('authEmail').value.trim();
+  if (!email) { showAuthError('Digite seu email para recuperar a senha'); return; }
+  try {
+    await sendPasswordResetEmail(auth, email);
+    showAuthError('Email de recuperação enviado! Verifique sua caixa de entrada.', true);
+  } catch(e) { showAuthError(friendlyAuthError(e.code)); }
+};
+
+window.authLogout = async () => {
+  if (!confirm('Deseja sair da sua conta?')) return;
+  await signOut(auth);
+};
+
+function friendlyAuthError(code) {
+  const msgs = {
+    'auth/user-not-found': 'Usuário não encontrado',
+    'auth/wrong-password': 'Senha incorreta',
+    'auth/email-already-in-use': 'Este email já está cadastrado',
+    'auth/invalid-email': 'Email inválido',
+    'auth/weak-password': 'Senha muito fraca (mínimo 6 caracteres)',
+    'auth/popup-closed-by-user': 'Login cancelado',
+    'auth/network-request-failed': 'Erro de conexão — verifique sua internet',
+    'auth/invalid-credential': 'Email ou senha incorretos',
+  };
+  return msgs[code] || 'Erro ao autenticar. Tente novamente.';
+}
+
+function showAuthForm(type) {
+  document.getElementById('formLogin').style.display = type === 'login' ? 'block' : 'none';
+  document.getElementById('formRegister').style.display = type === 'register' ? 'block' : 'none';
+  document.getElementById('authError').style.display = 'none';
+  document.getElementById('authTabLogin').classList.toggle('active', type === 'login');
+  document.getElementById('authTabRegister').classList.toggle('active', type === 'register');
+}
+window.showAuthForm = showAuthForm;
+
+function showAuthError(msg, success=false) {
+  const el = document.getElementById('authError');
+  el.textContent = msg;
+  el.style.display = 'block';
+  el.className = success ? 'auth-success' : 'auth-error';
+}
+
+function setAuthLoading(on) {
+  document.querySelectorAll('.auth-btn').forEach(b => b.disabled = on);
+}
+
+// ── NAVEGAÇÃO ──
+const pageTitles = {
+  dashboard:'Dashboard', trabalhos:'Trabalhos', 'novo-trabalho':'Novo Trabalho',
+  calculadora:'Calculadora Rápida', materiais:'Materiais', insumos:'Insumos',
+  impressoras:'Impressoras', relatorios:'Relatórios', configuracoes:'Configurações'
+};
+
+window.goTo = function(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const el = document.getElementById('page-' + page);
+  if (el) el.classList.add('active');
+  document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
+  document.getElementById('headerTitle').textContent = pageTitles[page] || page;
+  if (page === 'dashboard') renderDashboard();
+  if (page === 'trabalhos') renderTrabalhos();
+  if (page === 'materiais') renderFilamentos();
+  if (page === 'insumos') renderInsumos();
+  if (page === 'impressoras') renderImpressoras();
+  if (page === 'novo-trabalho' && !editTrabalhoId) limparFormTrabalho();
+  if (page === 'calculadora') renderCalcDropdowns();
+  if (page === 'configuracoes') loadConfigForm();
+  closeSidebar();
+};
+
+window.toggleSidebar = function() {
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('overlayBg').classList.toggle('open');
+};
+window.closeSidebar = function() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('overlayBg').classList.remove('open');
+};
+
+// ── CONFIGURAÇÕES ──
+function loadConfigForm() {
+  const c = DB.config;
+  document.getElementById('cfg-moeda').value = c.moeda;
+  document.getElementById('cfg-imposto-nome').value = c.impostoNome;
+  document.getElementById('cfg-imposto-taxa').value = c.impostoTaxa;
+  document.getElementById('cfg-kwh').value = c.kwh;
+  document.getElementById('cfg-mao').value = c.maoDeObra;
+  document.getElementById('cfg-margem').value = c.margemPadrao;
+  document.getElementById('cfg-nome').value = c.nomeNegocio;
+}
+
+window.salvarConfigExplicito = async function() {
+  DB.config.moeda = document.getElementById('cfg-moeda').value;
+  DB.config.impostoNome = document.getElementById('cfg-imposto-nome').value || 'IVA';
+  DB.config.impostoTaxa = parseFloat(document.getElementById('cfg-imposto-taxa').value) || 0;
+  DB.config.kwh = parseFloat(document.getElementById('cfg-kwh').value) || 0.22;
+  DB.config.maoDeObra = parseFloat(document.getElementById('cfg-mao').value) || 0;
+  DB.config.margemPadrao = parseFloat(document.getElementById('cfg-margem').value) || 40;
+  DB.config.nomeNegocio = document.getElementById('cfg-nome').value;
+  await saveConfig();
+  updateGlobalCurrency();
+  updateTaxLabels();
+  toast('Configurações salvas!');
+};
+
+function updateGlobalCurrency() {
+  const m = MOEDAS[DB.config.moeda] || MOEDAS.EUR;
+  document.getElementById('currencyBadge').textContent = m.simbolo + ' ' + m.nome;
+  updateTaxLabels();
+}
+function updateTaxLabels() {
+  const lbl = `Aplicar ${DB.config.impostoNome} (${DB.config.impostoTaxa}%)`;
+  ['taxToggleLabel','calcTaxLabel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = lbl;
+  });
+}
+
+// ── FILAMENTOS ──
+window.calcCustoGrama = function() {
+  const peso = parseFloat(document.getElementById('f-peso').value)||0;
+  const preco = parseFloat(document.getElementById('f-preco').value)||0;
+  document.getElementById('f-custo-g').value = peso > 0 ? (preco/peso).toFixed(4) : '0.0000';
+};
+
+window.openModalFilamento = function(id) {
+  ['f-nome','f-cor','f-fornecedor','f-marca'].forEach(f => document.getElementById(f).value='');
+  ['f-preco','f-peso','f-estoque','f-estoque-min'].forEach(f => document.getElementById(f).value='');
+  document.getElementById('f-tipo').value='PLA';
+  document.getElementById('f-data').value='';
+  document.getElementById('f-custo-g').value='';
+  document.getElementById('f-edit-id').value='';
+  if (id) {
+    const f = DB.filamentos.find(x => x.id===id);
+    if (f) {
+      document.getElementById('f-edit-id').value=id;
+      document.getElementById('f-nome').value=f.nome;
+      document.getElementById('f-marca').value=f.marca||'';
+      document.getElementById('f-tipo').value=f.tipo;
+      document.getElementById('f-cor').value=f.cor||'';
+      document.getElementById('f-peso').value=f.pesoCarretel;
+      document.getElementById('f-preco').value=f.preco;
+      document.getElementById('f-custo-g').value=f.custoPorGrama;
+      document.getElementById('f-estoque').value=f.estoque;
+      document.getElementById('f-estoque-min').value=f.estoqueMin;
+      document.getElementById('f-fornecedor').value=f.fornecedor||'';
+      document.getElementById('f-data').value=f.dataCompra||'';
+    }
+  }
+  openModal('modalFilamento');
+};
+
+window.salvarFilamento = async function() {
+  const nome = document.getElementById('f-nome').value.trim();
+  if (!nome) { toast('Informe o nome do filamento','error'); return; }
+  const peso = parseFloat(document.getElementById('f-peso').value)||0;
+  const preco = parseFloat(document.getElementById('f-preco').value)||0;
+  const obj = {
+    id: document.getElementById('f-edit-id').value || uid(),
+    nome, marca: document.getElementById('f-marca').value,
+    tipo: document.getElementById('f-tipo').value,
+    cor: document.getElementById('f-cor').value,
+    pesoCarretel: peso, preco,
+    custoPorGrama: peso>0 ? preco/peso : 0,
+    estoque: parseFloat(document.getElementById('f-estoque').value)||0,
+    estoqueMin: parseFloat(document.getElementById('f-estoque-min').value)||1,
+    fornecedor: document.getElementById('f-fornecedor').value,
+    dataCompra: document.getElementById('f-data').value
+  };
+  const idx = DB.filamentos.findIndex(x => x.id===obj.id);
+  if (idx>=0) DB.filamentos[idx]=obj; else DB.filamentos.push(obj);
+  await saveItem('filamentos', obj);
+  closeModal('modalFilamento'); renderFilamentos(); toast('Filamento salvo!');
+};
+
+window.deletarFilamento = async function(id) {
+  if (!confirm('Deletar filamento?')) return;
+  DB.filamentos = DB.filamentos.filter(f => f.id!==id);
+  await deleteItem('filamentos', id);
+  renderFilamentos(); toast('Removido','warn');
+};
+
+function renderFilamentos() {
+  const tb = document.getElementById('tabelaFilamentos');
+  const low = DB.filamentos.filter(f => f.estoque <= f.estoqueMin);
+  document.getElementById('alertsMateriais').innerHTML = low.map(f =>
+    `<div class="alert alert-danger">⚠️ Estoque baixo: <strong>${f.nome}</strong> — ${f.estoque} carretel(s)</div>`).join('');
+  document.getElementById('badge-materiais').style.display = low.length ? 'inline' : 'none';
+  if (!DB.filamentos.length) {
+    tb.innerHTML=`<tr><td colspan="9"><div class="empty"><div class="empty-icon">🧵</div><div class="empty-text">Nenhum filamento cadastrado</div></div></td></tr>`; return;
+  }
+  tb.innerHTML = DB.filamentos.map(f => `<tr>
+    <td><strong>${f.nome}</strong></td><td>${f.marca||'—'}</td>
+    <td><span class="badge badge-blue">${f.tipo}</span></td>
+    <td>${f.cor||'—'}</td><td class="mono">${f.pesoCarretel}g</td>
+    <td class="mono">${fmt(f.preco)}</td><td class="mono">${fmtG(f.custoPorGrama)}/g</td>
+    <td class="${f.estoque<=f.estoqueMin?'stock-low':'stock-ok'} mono">${f.estoque}</td>
+    <td><div class="flex gap-8">
+      <button class="btn btn-secondary btn-sm" onclick="openModalFilamento('${f.id}')">✏️</button>
+      <button class="btn btn-danger btn-sm" onclick="deletarFilamento('${f.id}')">🗑</button>
+    </div></td></tr>`).join('');
+}
+
+// ── INSUMOS ──
+window.calcCustoInsumo = function() {
+  const qtd = parseFloat(document.getElementById('i-qtd').value)||0;
+  const preco = parseFloat(document.getElementById('i-preco').value)||0;
+  document.getElementById('i-custo-un').value = qtd>0 ? (preco/qtd).toFixed(4) : '0.0000';
+};
+
+window.openModalInsumo = function(id) {
+  ['i-nome','i-fornecedor','i-obs'].forEach(f => document.getElementById(f).value='');
+  ['i-qtd','i-preco','i-estoque','i-estoque-min'].forEach(f => document.getElementById(f).value='');
+  document.getElementById('i-cat').value='Embalagem';
+  document.getElementById('i-unidade').value='un';
+  document.getElementById('i-data').value='';
+  document.getElementById('i-custo-un').value='';
+  document.getElementById('i-edit-id').value='';
+  if (id) {
+    const ins = DB.insumos.find(x => x.id===id);
+    if (ins) {
+      document.getElementById('i-edit-id').value=id;
+      document.getElementById('i-nome').value=ins.nome;
+      document.getElementById('i-cat').value=ins.categoria;
+      document.getElementById('i-unidade').value=ins.unidade;
+      document.getElementById('i-qtd').value=ins.qtdComprada;
+      document.getElementById('i-preco').value=ins.precoTotal;
+      document.getElementById('i-custo-un').value=ins.custoUn;
+      document.getElementById('i-estoque').value=ins.estoque;
+      document.getElementById('i-estoque-min').value=ins.estoqueMin;
+      document.getElementById('i-fornecedor').value=ins.fornecedor||'';
+      document.getElementById('i-data').value=ins.dataCompra||'';
+      document.getElementById('i-obs').value=ins.obs||'';
+    }
+  }
+  openModal('modalInsumo');
+};
+
+window.salvarInsumo = async function() {
+  const nome = document.getElementById('i-nome').value.trim();
+  if (!nome) { toast('Informe o nome do insumo','error'); return; }
+  const qtd = parseFloat(document.getElementById('i-qtd').value)||0;
+  const preco = parseFloat(document.getElementById('i-preco').value)||0;
+  const obj = {
+    id: document.getElementById('i-edit-id').value || uid(),
+    nome, categoria: document.getElementById('i-cat').value,
+    unidade: document.getElementById('i-unidade').value,
+    qtdComprada: qtd, precoTotal: preco,
+    custoUn: qtd>0 ? preco/qtd : 0,
+    estoque: parseFloat(document.getElementById('i-estoque').value)||0,
+    estoqueMin: parseFloat(document.getElementById('i-estoque-min').value)||0,
+    fornecedor: document.getElementById('i-fornecedor').value,
+    dataCompra: document.getElementById('i-data').value,
+    obs: document.getElementById('i-obs').value
+  };
+  const idx = DB.insumos.findIndex(x => x.id===obj.id);
+  if (idx>=0) DB.insumos[idx]=obj; else DB.insumos.push(obj);
+  await saveItem('insumos', obj);
+  closeModal('modalInsumo'); renderInsumos(); toast('Insumo salvo!');
+};
+
+window.filterInsumos = function(cat, el) {
+  insumoFilter = cat;
+  document.querySelectorAll('#tabsInsumos .tab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  renderInsumos();
+};
+
+window.deletarInsumo = async function(id) {
+  if (!confirm('Deletar insumo?')) return;
+  DB.insumos = DB.insumos.filter(i => i.id!==id);
+  await deleteItem('insumos', id);
+  renderInsumos(); toast('Removido','warn');
+};
+
+function renderInsumos() {
+  const low = DB.insumos.filter(i => i.estoque<=i.estoqueMin && i.estoqueMin>0);
+  document.getElementById('alertsInsumos').innerHTML = low.map(i =>
+    `<div class="alert alert-danger">⚠️ Estoque baixo: <strong>${i.nome}</strong> — ${i.estoque} ${i.unidade}</div>`).join('');
+  document.getElementById('badge-insumos').style.display = low.length ? 'inline' : 'none';
+  const list = insumoFilter ? DB.insumos.filter(i => i.categoria.includes(insumoFilter)) : DB.insumos;
+  const tb = document.getElementById('tabelaInsumos');
+  if (!list.length) {
+    tb.innerHTML=`<tr><td colspan="8"><div class="empty"><div class="empty-icon">📦</div><div class="empty-text">Nenhum insumo encontrado</div></div></td></tr>`; return;
+  }
+  const catColors = { Embalagem:'badge-orange',Proteção:'badge-blue',Fixação:'badge-yellow',
+    'Etiquetas e Impressão':'badge-green',Acabamento:'badge-red',
+    'Componentes / Acessórios':'badge-blue',Outros:'badge-gray' };
+  tb.innerHTML = list.map(i => `<tr>
+    <td><strong>${i.nome}</strong></td>
+    <td><span class="badge ${catColors[i.categoria]||'badge-gray'}">${i.categoria}</span></td>
+    <td>${i.unidade}</td><td class="mono">${fmt(i.custoUn)}</td>
+    <td class="${i.estoque<=i.estoqueMin&&i.estoqueMin>0?'stock-low':'stock-ok'} mono">${i.estoque} ${i.unidade}</td>
+    <td class="mono">${i.estoqueMin} ${i.unidade}</td>
+    <td>${i.fornecedor||'—'}</td>
+    <td><div class="flex gap-8">
+      <button class="btn btn-secondary btn-sm" onclick="openModalInsumo('${i.id}')">✏️</button>
+      <button class="btn btn-danger btn-sm" onclick="deletarInsumo('${i.id}')">🗑</button>
+    </div></td></tr>`).join('');
+}
+
+// ── IMPRESSORAS ──
+window.calcDepreciacao = function() {
+  const preco = parseFloat(document.getElementById('imp-preco').value)||0;
+  const vida = parseFloat(document.getElementById('imp-vida').value)||1;
+  const pot = parseFloat(document.getElementById('imp-potencia').value)||0;
+  document.getElementById('imp-dep').value = (preco/vida).toFixed(4);
+  document.getElementById('imp-eletrico').value = (pot/1000*DB.config.kwh).toFixed(4);
+};
+
+window.openModalImpressora = function(id) {
+  ['imp-nome','imp-preco','imp-vida','imp-potencia'].forEach(f => document.getElementById(f).value='');
+  document.getElementById('imp-dep').value='';
+  document.getElementById('imp-eletrico').value='';
+  document.getElementById('imp-edit-id').value='';
+  if (id) {
+    const imp = DB.impressoras.find(x => x.id===id);
+    if (imp) {
+      document.getElementById('imp-edit-id').value=id;
+      document.getElementById('imp-nome').value=imp.nome;
+      document.getElementById('imp-preco').value=imp.preco;
+      document.getElementById('imp-vida').value=imp.vidaUtil;
+      document.getElementById('imp-potencia').value=imp.potencia;
+      document.getElementById('imp-dep').value=imp.depreciacaoPorH.toFixed(4);
+      document.getElementById('imp-eletrico').value=imp.custEletricoH.toFixed(4);
+    }
+  }
+  openModal('modalImpressora');
+};
+
+window.salvarImpressora = async function() {
+  const nome = document.getElementById('imp-nome').value.trim();
+  if (!nome) { toast('Informe o modelo','error'); return; }
+  const preco = parseFloat(document.getElementById('imp-preco').value)||0;
+  const vida = parseFloat(document.getElementById('imp-vida').value)||1;
+  const pot = parseFloat(document.getElementById('imp-potencia').value)||0;
+  const obj = {
+    id: document.getElementById('imp-edit-id').value || uid(),
+    nome, preco, vidaUtil:vida, potencia:pot,
+    depreciacaoPorH: preco/vida,
+    custEletricoH: pot/1000*DB.config.kwh
+  };
+  const idx = DB.impressoras.findIndex(x => x.id===obj.id);
+  if (idx>=0) DB.impressoras[idx]=obj; else DB.impressoras.push(obj);
+  await saveItem('impressoras', obj);
+  closeModal('modalImpressora'); renderImpressoras(); toast('Impressora salva!');
+};
+
+window.deletarImpressora = async function(id) {
+  if (!confirm('Deletar impressora?')) return;
+  DB.impressoras = DB.impressoras.filter(i => i.id!==id);
+  await deleteItem('impressoras', id);
+  renderImpressoras(); toast('Removida','warn');
+};
+
+function renderImpressoras() {
+  const tb = document.getElementById('tabelaImpressoras');
+  if (!DB.impressoras.length) {
+    tb.innerHTML=`<tr><td colspan="7"><div class="empty"><div class="empty-icon">🖨️</div><div class="empty-text">Nenhuma impressora cadastrada</div></div></td></tr>`; return;
+  }
+  tb.innerHTML = DB.impressoras.map(i => `<tr>
+    <td><strong>${i.nome}</strong></td>
+    <td class="mono">${fmt(i.preco)}</td><td class="mono">${i.vidaUtil}h</td>
+    <td class="mono">${i.potencia}W</td>
+    <td class="mono">${fmt(i.depreciacaoPorH)}/h</td>
+    <td class="mono">${fmt(i.custEletricoH)}/h</td>
+    <td><div class="flex gap-8">
+      <button class="btn btn-secondary btn-sm" onclick="openModalImpressora('${i.id}')">✏️</button>
+      <button class="btn btn-danger btn-sm" onclick="deletarImpressora('${i.id}')">🗑</button>
+    </div></td></tr>`).join('');
+}
+
+// ── NOVO TRABALHO ──
+window.limparFormTrabalho = function() {
+  editTrabalhoId=null;
+  document.getElementById('formTrabalhoTitle').textContent='Novo Trabalho';
+  ['tj-nome','tj-cliente','tj-obs'].forEach(f => document.getElementById(f).value='');
+  ['tj-tempo-h','tj-tempo-m','tj-falha','tj-pos','tj-frete','tj-preco-venda','tj-marketplace'].forEach(f => document.getElementById(f).value='');
+  document.getElementById('tj-data').value=new Date().toISOString().split('T')[0];
+  document.getElementById('tj-status').value='Pendente';
+  document.getElementById('tj-margem').value=DB.config.margemPadrao;
+  document.getElementById('margemLabel').textContent=DB.config.margemPadrao;
+  taxToggleOn=false;
+  document.getElementById('taxToggle').className='toggle';
+  filamentosRows=[]; insumosRows=[];
+  renderFilamentosRows(); renderInsumosRows();
+  populateImpressoraDropdown('tj-impressora');
+  calcTrabalho();
+};
+
+function populateImpressoraDropdown(id) {
+  const sel = document.getElementById(id);
+  const cur = sel.value;
+  sel.innerHTML='<option value="">Selecionar...</option>'+
+    DB.impressoras.map(i=>`<option value="${i.id}">${i.nome}</option>`).join('');
+  if (cur) sel.value=cur;
+}
+
+window.addFilamentoRow = function() {
+  filamentosRows.push({id:uid(),filId:'',cor:'',peso:0});
+  renderFilamentosRows();
+};
+window.removeFilamentoRow = function(id) {
+  filamentosRows=filamentosRows.filter(r=>r.id!==id);
+  renderFilamentosRows(); calcTrabalho();
+};
+function calcFilCost(r) {
+  const f=DB.filamentos.find(x=>x.id===r.filId);
+  return f ? f.custoPorGrama*(r.peso||0) : 0;
+}
+function renderFilamentosRows() {
+  const container=document.getElementById('filamentosContainer');
+  if (!filamentosRows.length) {
+    container.innerHTML=`<div class="empty" style="padding:20px"><div class="empty-text">Clique em "+ Filamento" para adicionar</div></div>`; return;
+  }
+  container.innerHTML=filamentosRows.map(r=>{
+    const corBg=r.cor&&CSS.supports('color',r.cor)?r.cor:'#888';
+    return `<div class="fil-card">
+      <div class="fil-card-header">
+        <span><span class="fil-dot" style="background:${corBg}"></span><strong>Filamento</strong></span>
+        <button class="btn btn-danger btn-sm" onclick="removeFilamentoRow('${r.id}')">✕</button>
+      </div>
+      <div class="form-grid-3">
+        <div class="field"><label>Material</label>
+          <select onchange="updateFilRow('${r.id}','filId',this.value);calcTrabalho()">
+            <option value="">Selecionar...</option>
+            ${DB.filamentos.map(f=>`<option value="${f.id}" ${f.id===r.filId?'selected':''}>${f.nome} (${f.tipo})</option>`).join('')}
+          </select></div>
+        <div class="field"><label>Cor</label>
+          <input type="text" value="${r.cor}" placeholder="Ex: Vermelho" oninput="updateFilRow('${r.id}','cor',this.value)"></div>
+        <div class="field"><label>Peso (g)</label>
+          <input type="number" value="${r.peso||''}" placeholder="0" min="0" step="0.1" oninput="updateFilRow('${r.id}','peso',parseFloat(this.value)||0);calcTrabalho()"></div>
+      </div>
+      <div class="breakdown-row" style="margin-top:8px">
+        <span>Custo estimado</span>
+        <span class="mono text-orange">${fmt(calcFilCost(r))}</span>
+      </div></div>`;
+  }).join('');
+}
+window.updateFilRow = function(id,field,val) {
+  const r=filamentosRows.find(x=>x.id===id);
+  if(r){r[field]=val;renderFilamentosRows();calcTrabalho();}
+};
+
+window.addInsumoRow = function() {
+  insumosRows.push({id:uid(),insId:'',qtd:1});
+  renderInsumosRows();
+};
+window.removeInsumoRow = function(id) {
+  insumosRows=insumosRows.filter(r=>r.id!==id);
+  renderInsumosRows(); calcTrabalho();
+};
+function calcInsCost(r) {
+  const ins=DB.insumos.find(x=>x.id===r.insId);
+  return ins ? ins.custoUn*(r.qtd||0) : 0;
+}
+function renderInsumosRows() {
+  const container=document.getElementById('insumosContainer');
+  if (!insumosRows.length) {
+    container.innerHTML=`<div class="empty" style="padding:20px"><div class="empty-text">Clique em "+ Insumo" para adicionar</div></div>`; return;
+  }
+  container.innerHTML=insumosRows.map(r=>`
+    <div class="fil-card">
+      <div class="fil-card-header">
+        <span>📦 <strong>Insumo</strong></span>
+        <button class="btn btn-danger btn-sm" onclick="removeInsumoRow('${r.id}')">✕</button>
+      </div>
+      <div class="form-grid">
+        <div class="field"><label>Insumo</label>
+          <select onchange="updateInsRow('${r.id}','insId',this.value);calcTrabalho()">
+            <option value="">Selecionar...</option>
+            ${DB.insumos.map(i=>`<option value="${i.id}" ${i.id===r.insId?'selected':''}>${i.nome} (${fmt(i.custoUn)}/${i.unidade})</option>`).join('')}
+          </select></div>
+        <div class="field"><label>Quantidade</label>
+          <input type="number" value="${r.qtd||1}" min="0.01" step="0.01" oninput="updateInsRow('${r.id}','qtd',parseFloat(this.value)||0);calcTrabalho()"></div>
+      </div>
+      <div class="breakdown-row" style="margin-top:8px">
+        <span>Custo estimado</span>
+        <span class="mono text-orange">${fmt(calcInsCost(r))}</span>
+      </div></div>`).join('');
+}
+window.updateInsRow = function(id,field,val) {
+  const r=insumosRows.find(x=>x.id===id);
+  if(r){r[field]=val;renderInsumosRows();calcTrabalho();}
+};
+
+window.toggleTax = function() {
+  taxToggleOn=!taxToggleOn;
+  document.getElementById('taxToggle').className='toggle'+(taxToggleOn?' on':'');
+  calcTrabalho();
+};
+
+window.calcTrabalho = function() {
+  const h=parseFloat(document.getElementById('tj-tempo-h').value)||0;
+  const m=parseFloat(document.getElementById('tj-tempo-m').value)||0;
+  const totalH=h+m/60;
+  const falha=(parseFloat(document.getElementById('tj-falha').value)||0)/100;
+  const posMin=parseFloat(document.getElementById('tj-pos').value)||0;
+  const frete=parseFloat(document.getElementById('tj-frete').value)||0;
+  const marketplace=(parseFloat(document.getElementById('tj-marketplace').value)||0)/100;
+  const margem=(parseFloat(document.getElementById('tj-margem').value)||40)/100;
+  const impId=document.getElementById('tj-impressora').value;
+  const imp=DB.impressoras.find(x=>x.id===impId);
+  const custoFil=filamentosRows.reduce((a,r)=>a+calcFilCost(r)*(1+falha),0);
+  const custoIns=insumosRows.reduce((a,r)=>a+calcInsCost(r),0);
+  const custoElet=imp?imp.custEletricoH*totalH:0;
+  const custoDepr=imp?imp.depreciacaoPorH*totalH:0;
+  const custoMao=DB.config.maoDeObra*(posMin/60);
+  const custoTotal=custoFil+custoIns+custoElet+custoDepr+custoMao+frete;
+  const precoMargem=margem<1?custoTotal/(1-margem):custoTotal*2;
+  const precoMkt=marketplace>0?precoMargem/(1-marketplace):precoMargem;
+  const taxa=taxToggleOn?DB.config.impostoTaxa/100:0;
+  const precoFinal=precoMkt*(1+taxa);
+  document.getElementById('breakdownTrabalho').innerHTML=`
+    <div class="breakdown-row"><span>Filamentos</span><span class="mono">${fmt(custoFil)}</span></div>
+    <div class="breakdown-row"><span>Insumos</span><span class="mono">${fmt(custoIns)}</span></div>
+    <div class="breakdown-row"><span>Eletricidade</span><span class="mono">${fmt(custoElet)}</span></div>
+    <div class="breakdown-row"><span>Depreciação</span><span class="mono">${fmt(custoDepr)}</span></div>
+    <div class="breakdown-row"><span>Mão de Obra</span><span class="mono">${fmt(custoMao)}</span></div>
+    <div class="breakdown-row"><span>Frete</span><span class="mono">${fmt(frete)}</span></div>
+    <div class="breakdown-row total"><span>CUSTO TOTAL</span><span class="mono">${fmt(custoTotal)}</span></div>`;
+  document.getElementById('precoResult').innerHTML=`
+    <div class="breakdown-row"><span>Break-even</span><span class="mono">${fmt(custoTotal)}</span></div>
+    <div class="breakdown-row"><span>Com margem (${Math.round(margem*100)}%)</span><span class="mono">${fmt(precoMargem)}</span></div>
+    ${marketplace>0?`<div class="breakdown-row"><span>Com marketplace</span><span class="mono">${fmt(precoMkt)}</span></div>`:''}
+    ${taxToggleOn?`<div class="breakdown-row"><span>Com ${DB.config.impostoNome} (${DB.config.impostoTaxa}%)</span><span class="mono">${fmt(precoFinal)}</span></div>`:''}
+    <div class="breakdown-row total"><span>PREÇO SUGERIDO</span><span class="mono text-orange">${fmt(precoFinal)}</span></div>`;
+  return {custoTotal,precoFinal};
+};
+
+window.salvarTrabalho = async function() {
+  const nome=document.getElementById('tj-nome').value.trim();
+  if (!nome){toast('Informe o nome do trabalho','error');return;}
+  const calc=calcTrabalho();
+  const obj={
+    id:editTrabalhoId||uid(),
+    nome, cliente:document.getElementById('tj-cliente').value,
+    data:document.getElementById('tj-data').value||new Date().toISOString().split('T')[0],
+    impressoraId:document.getElementById('tj-impressora').value,
+    tempoH:parseFloat(document.getElementById('tj-tempo-h').value)||0,
+    tempoM:parseFloat(document.getElementById('tj-tempo-m').value)||0,
+    falha:parseFloat(document.getElementById('tj-falha').value)||0,
+    posMin:parseFloat(document.getElementById('tj-pos').value)||0,
+    frete:parseFloat(document.getElementById('tj-frete').value)||0,
+    marketplace:parseFloat(document.getElementById('tj-marketplace').value)||0,
+    margem:parseFloat(document.getElementById('tj-margem').value)||40,
+    obs:document.getElementById('tj-obs').value,
+    status:document.getElementById('tj-status').value,
+    custoTotal:calc.custoTotal,
+    precoVenda:parseFloat(document.getElementById('tj-preco-venda').value)||calc.precoFinal,
+    filamentos:filamentosRows.map(r=>({...r})),
+    insumos:insumosRows.map(r=>({...r}))
+  };
+  insumosRows.forEach(r=>{
+    const ins=DB.insumos.find(x=>x.id===r.insId);
+    if(ins){
+      const oldTrab=editTrabalhoId?DB.trabalhos.find(t=>t.id===editTrabalhoId):null;
+      const oldRow=oldTrab?oldTrab.insumos?.find(x=>x.insId===r.insId):null;
+      const diff=(r.qtd||0)-(oldRow?oldRow.qtd||0:0);
+      ins.estoque=Math.max(0,ins.estoque-diff);
+      saveItem('insumos',ins);
+    }
+  });
+  const idx=DB.trabalhos.findIndex(x=>x.id===obj.id);
+  if(idx>=0)DB.trabalhos[idx]=obj; else DB.trabalhos.push(obj);
+  await saveItem('trabalhos',obj);
+  toast('Trabalho salvo!'); goTo('trabalhos');
+};
+
+window.editarTrabalho = function(id) {
+  const t=DB.trabalhos.find(x=>x.id===id);
+  if(!t)return;
+  editTrabalhoId=id;
+  goTo('novo-trabalho');
+  document.getElementById('formTrabalhoTitle').textContent='Editar Trabalho';
+  document.getElementById('tj-nome').value=t.nome;
+  document.getElementById('tj-cliente').value=t.cliente||'';
+  document.getElementById('tj-data').value=t.data||'';
+  document.getElementById('tj-tempo-h').value=t.tempoH||0;
+  document.getElementById('tj-tempo-m').value=t.tempoM||0;
+  document.getElementById('tj-falha').value=t.falha||0;
+  document.getElementById('tj-pos').value=t.posMin||0;
+  document.getElementById('tj-frete').value=t.frete||0;
+  document.getElementById('tj-marketplace').value=t.marketplace||0;
+  document.getElementById('tj-margem').value=t.margem||40;
+  document.getElementById('margemLabel').textContent=t.margem||40;
+  document.getElementById('tj-status').value=t.status||'Pendente';
+  document.getElementById('tj-obs').value=t.obs||'';
+  document.getElementById('tj-preco-venda').value=t.precoVenda||'';
+  populateImpressoraDropdown('tj-impressora');
+  document.getElementById('tj-impressora').value=t.impressoraId||'';
+  filamentosRows=(t.filamentos||[]).map(r=>({...r}));
+  insumosRows=(t.insumos||[]).map(r=>({...r}));
+  renderFilamentosRows(); renderInsumosRows(); calcTrabalho();
+};
+
+window.deletarTrabalho = async function(id) {
+  if(!confirm('Deletar trabalho?'))return;
+  DB.trabalhos=DB.trabalhos.filter(t=>t.id!==id);
+  await deleteItem('trabalhos',id);
+  renderTrabalhos(); toast('Removido','warn');
+};
+
+function renderTrabalhos() {
+  const filtro=document.getElementById('filtroStatus').value;
+  const list=filtro?DB.trabalhos.filter(t=>t.status===filtro):DB.trabalhos;
+  const tb=document.getElementById('tabelaTrabalhos');
+  if(!list.length){
+    tb.innerHTML=`<tr><td colspan="8"><div class="empty"><div class="empty-icon">🗂</div><div class="empty-text">Nenhum trabalho encontrado</div></div></td></tr>`; return;
+  }
+  const sc={Pendente:'badge-yellow','Em andamento':'badge-blue',Concluído:'badge-green',Entregue:'badge-gray'};
+  tb.innerHTML=[...list].reverse().map(t=>{
+    const lucro=(t.precoVenda||0)-(t.custoTotal||0);
+    return `<tr>
+      <td><strong>${t.nome}</strong></td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td>
+      <td class="mono">${fmt(t.custoTotal)}</td><td class="mono">${fmt(t.precoVenda)}</td>
+      <td class="mono ${lucro>=0?'stock-ok':'stock-low'}">${fmt(lucro)}</td>
+      <td><span class="badge ${sc[t.status]||'badge-gray'}">${t.status}</span></td>
+      <td><div class="flex gap-8">
+        <button class="btn btn-secondary btn-sm" onclick="editarTrabalho('${t.id}')">✏️</button>
+        <button class="btn btn-danger btn-sm" onclick="deletarTrabalho('${t.id}')">🗑</button>
+      </div></td></tr>`;
+  }).join('');
+}
+
+// ── DASHBOARD ──
+window.setPeriod = function(p, el) {
+  currentPeriod=p;
+  document.querySelectorAll('#periodPills .pill').forEach(e=>e.classList.remove('active'));
+  if(el)el.classList.add('active');
+  renderDashboard();
+};
+
+function filtrarPorPeriodo(trabalhos) {
+  const hoje=new Date(); hoje.setHours(0,0,0,0);
+  return trabalhos.filter(t=>{
+    if(!t.data)return currentPeriod==='todos';
+    const d=new Date(t.data+'T00:00:00');
+    if(currentPeriod==='hoje')return d>=hoje;
+    if(currentPeriod==='semana'){const ini=new Date(hoje);ini.setDate(hoje.getDate()-hoje.getDay());return d>=ini;}
+    if(currentPeriod==='mes')return d.getMonth()===hoje.getMonth()&&d.getFullYear()===hoje.getFullYear();
+    if(currentPeriod==='30dias'){const ini=new Date(hoje);ini.setDate(hoje.getDate()-30);return d>=ini;}
+    if(currentPeriod==='ano')return d.getFullYear()===hoje.getFullYear();
+    return true;
+  });
+}
+
+function renderDashboard() {
+  const work=filtrarPorPeriodo(DB.trabalhos);
+  const receita=work.reduce((a,t)=>a+(t.precoVenda||0),0);
+  const custos=work.reduce((a,t)=>a+(t.custoTotal||0),0);
+  const lucro=receita-custos;
+  const margem=receita>0?(lucro/receita*100):0;
+  document.getElementById('dashCards').innerHTML=`
+    <div class="card"><div class="card-label">Receita Total</div><div class="card-value blue">${fmt(receita)}</div><div class="card-sub">${work.length} trabalho(s)</div></div>
+    <div class="card"><div class="card-label">Custos Totais</div><div class="card-value red">${fmt(custos)}</div></div>
+    <div class="card"><div class="card-label">Lucro Total</div><div class="card-value ${lucro>=0?'green':'red'}">${fmt(lucro)}</div></div>
+    <div class="card"><div class="card-label">Margem de Lucro</div><div class="card-value orange">${margem.toFixed(1)}%</div></div>`;
+  const lowFil=DB.filamentos.filter(f=>f.estoque<=f.estoqueMin);
+  const lowIns=DB.insumos.filter(i=>i.estoque<=i.estoqueMin&&i.estoqueMin>0);
+  document.getElementById('dash-alerts').innerHTML=[
+    ...lowFil.map(f=>`<div class="alert alert-danger">⚠️ Filamento em estoque baixo: <strong>${f.nome}</strong></div>`),
+    ...lowIns.map(i=>`<div class="alert alert-warn">📦 Insumo em estoque baixo: <strong>${i.nome}</strong></div>`)
+  ].join('');
+  const sc={Pendente:'badge-yellow','Em andamento':'badge-blue',Concluído:'badge-green',Entregue:'badge-gray'};
+  const recent=[...work].reverse().slice(0,8);
+  document.getElementById('dashRecentJobs').innerHTML=recent.length?recent.map(t=>`
+    <div style="padding:12px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <div><div style="font-size:13px;font-weight:600">${t.nome}</div><div style="font-size:11px;color:var(--text3)">${t.cliente||'—'} · ${t.data||'—'}</div></div>
+      <div style="text-align:right"><div class="mono" style="font-size:13px">${fmt(t.precoVenda)}</div>
+      <span class="badge ${sc[t.status]||'badge-gray'}" style="margin-top:4px">${t.status}</span></div>
+    </div>`).join(''):`<div class="empty"><div class="empty-icon">🗂</div><div class="empty-text">Nenhum trabalho no período</div></div>`;
+  renderDashChart();
+}
+
+function renderDashChart() {
+  const group=document.getElementById('chartGroup').value;
+  const work=filtrarPorPeriodo(DB.trabalhos);
+  const groups={};
+  work.forEach(t=>{
+    if(!t.data)return;
+    const d=new Date(t.data+'T00:00:00');
+    let key;
+    if(group==='dia')key=t.data;
+    else if(group==='semana'){const w=getWeek(d);key=`${d.getFullYear()}-S${w}`;}
+    else key=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    if(!groups[key])groups[key]={receita:0,custo:0};
+    groups[key].receita+=t.precoVenda||0;
+    groups[key].custo+=t.custoTotal||0;
+  });
+  const labels=Object.keys(groups).sort();
+  const receitas=labels.map(k=>groups[k].receita);
+  const custosList=labels.map(k=>groups[k].custo);
+  const lucros=labels.map((_,i)=>receitas[i]-custosList[i]);
+  const ctx=document.getElementById('dashChart').getContext('2d');
+  if(dashChartInstance)dashChartInstance.destroy();
+  dashChartInstance=new Chart(ctx,{
+    type:'bar',
+    data:{labels,datasets:[
+      {label:'Receita',data:receitas,backgroundColor:'rgba(59,130,246,.7)',borderRadius:4},
+      {label:'Custos',data:custosList,backgroundColor:'rgba(239,68,68,.7)',borderRadius:4},
+      {label:'Lucro',data:lucros,backgroundColor:'rgba(34,197,94,.7)',borderRadius:4}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{labels:{color:'#94a3b8',font:{size:11}}}},
+      scales:{x:{ticks:{color:'#64748b',font:{size:10}},grid:{color:'rgba(45,55,72,.5)'}},
+              y:{ticks:{color:'#64748b',font:{size:10}},grid:{color:'rgba(45,55,72,.5)'}}}}
+  });
+}
+function getWeek(d){const o=new Date(d.getFullYear(),0,1);return Math.ceil((((d-o)/86400000)+o.getDay()+1)/7);}
+
+// ── CALCULADORA ──
+window.renderCalcDropdowns = function() {
+  document.getElementById('c-mat').innerHTML='<option value="">Manual</option>'+
+    DB.filamentos.map(f=>`<option value="${f.id}">${f.nome}</option>`).join('');
+  document.getElementById('c-imp').innerHTML='<option value="">Nenhuma</option>'+
+    DB.impressoras.map(i=>`<option value="${i.id}">${i.nome}</option>`).join('');
+};
+window.calcMatCalc = function() {
+  const matId=document.getElementById('c-mat').value;
+  const peso=parseFloat(document.getElementById('c-peso').value)||0;
+  if(matId&&peso>0){const f=DB.filamentos.find(x=>x.id===matId);if(f)document.getElementById('c-fil').value=(f.custoPorGrama*peso).toFixed(2);}
+  calcCalc();
+};
+window.toggleCalcTax = function() {
+  calcTaxOn=!calcTaxOn;
+  document.getElementById('calcTaxToggle').className='toggle'+(calcTaxOn?' on':'');
+  calcCalc();
+};
+window.calcCalc = function() {
+  const fil=parseFloat(document.getElementById('c-fil').value)||0;
+  const h=parseFloat(document.getElementById('c-tempo-h').value)||0;
+  const m=parseFloat(document.getElementById('c-tempo-m').value)||0;
+  const totalH=h+m/60;
+  const ins=parseFloat(document.getElementById('c-insumos').value)||0;
+  const frete=parseFloat(document.getElementById('c-frete').value)||0;
+  const maoH=parseFloat(document.getElementById('c-mao-h').value)||0;
+  const maoMin=parseFloat(document.getElementById('c-mao-min').value)||0;
+  const marketplace=(parseFloat(document.getElementById('c-marketplace').value)||0)/100;
+  const margem=(parseFloat(document.getElementById('c-margem').value)||40)/100;
+  const impId=document.getElementById('c-imp').value;
+  const imp=DB.impressoras.find(x=>x.id===impId);
+  const custoElet=imp?imp.custEletricoH*totalH:0;
+  const custoDepr=imp?imp.depreciacaoPorH*totalH:0;
+  const custoMao=maoH*(maoMin/60);
+  const custoTotal=fil+ins+custoElet+custoDepr+custoMao+frete;
+  const precoMargem=margem<1?custoTotal/(1-margem):custoTotal*2;
+  const precoMkt=marketplace>0?precoMargem/(1-marketplace):precoMargem;
+  const taxa=calcTaxOn?DB.config.impostoTaxa/100:0;
+  const precoFinal=precoMkt*(1+taxa);
+  const lucroEstimado=precoFinal-custoTotal;
+  document.getElementById('calcRows').innerHTML=`
+    <div class="calc-row"><span class="calc-label">Filamento</span><span class="calc-value">${fmt(fil)}</span></div>
+    <div class="calc-row"><span class="calc-label">Insumos</span><span class="calc-value">${fmt(ins)}</span></div>
+    <div class="calc-row"><span class="calc-label">Eletricidade</span><span class="calc-value">${fmt(custoElet)}</span></div>
+    <div class="calc-row"><span class="calc-label">Depreciação</span><span class="calc-value">${fmt(custoDepr)}</span></div>
+    <div class="calc-row"><span class="calc-label">Mão de Obra</span><span class="calc-value">${fmt(custoMao)}</span></div>
+    <div class="calc-row"><span class="calc-label">Frete</span><span class="calc-value">${fmt(frete)}</span></div>
+    <div class="calc-row" style="border-top:1px solid var(--border);padding-top:10px"><span class="calc-label fw-600">Custo Total</span><span class="calc-value">${fmt(custoTotal)}</span></div>
+    <div class="calc-row"><span class="calc-label">Break-even</span><span class="calc-value">${fmt(custoTotal)}</span></div>
+    <div class="calc-row"><span class="calc-label">Com margem (${Math.round(margem*100)}%)</span><span class="calc-value">${fmt(precoMargem)}</span></div>
+    ${marketplace>0?`<div class="calc-row"><span class="calc-label">Com marketplace</span><span class="calc-value">${fmt(precoMkt)}</span></div>`:''}
+    ${calcTaxOn?`<div class="calc-row"><span class="calc-label">Com ${DB.config.impostoNome} (${DB.config.impostoTaxa}%)</span><span class="calc-value">${fmt(precoFinal)}</span></div>`:''}
+    <div class="calc-row total"><span>💰 PREÇO FINAL</span><span>${fmt(precoFinal)}</span></div>
+    <div class="calc-row"><span class="calc-label">Lucro estimado</span><span class="calc-value ${lucroEstimado>=0?'stock-ok':'stock-low'}">${fmt(lucroEstimado)} (${custoTotal>0?(lucroEstimado/precoFinal*100).toFixed(1):'0'}%)</span></div>`;
+};
+window.limparCalc = function() {
+  ['c-fil','c-peso','c-tempo-h','c-tempo-m','c-insumos','c-frete','c-mao-h','c-mao-min','c-marketplace'].forEach(f=>document.getElementById(f).value='');
+  document.getElementById('c-mat').value=''; document.getElementById('c-imp').value='';
+  document.getElementById('c-margem').value=40; document.getElementById('cMargemLabel').textContent=40;
+  calcTaxOn=false; document.getElementById('calcTaxToggle').className='toggle'; calcCalc();
+};
+window.salvarComoTrabalho = function() {
+  goTo('novo-trabalho');
+  document.getElementById('tj-tempo-h').value=document.getElementById('c-tempo-h').value;
+  document.getElementById('tj-tempo-m').value=document.getElementById('c-tempo-m').value;
+  document.getElementById('tj-frete').value=document.getElementById('c-frete').value;
+  document.getElementById('tj-marketplace').value=document.getElementById('c-marketplace').value;
+  document.getElementById('tj-margem').value=document.getElementById('c-margem').value;
+  document.getElementById('margemLabel').textContent=document.getElementById('c-margem').value;
+  toast('Dados copiados — complete e salve!','info');
+};
+
+// ── RELATÓRIOS ──
+window.toggleCustomPeriod = function() {
+  const isCustom=document.getElementById('rel-periodo').value==='custom';
+  document.getElementById('relDataIni').style.display=isCustom?'block':'none';
+  document.getElementById('relDataFim').style.display=isCustom?'block':'none';
+};
+function getRelTrabalhos() {
+  const periodo=document.getElementById('rel-periodo').value;
+  const hoje=new Date(); hoje.setHours(0,0,0,0);
+  return DB.trabalhos.filter(t=>{
+    if(periodo==='todos')return true;
+    if(!t.data)return false;
+    const d=new Date(t.data+'T00:00:00');
+    if(periodo==='hoje')return d>=hoje;
+    if(periodo==='semana'){const ini=new Date(hoje);ini.setDate(hoje.getDate()-hoje.getDay());return d>=ini;}
+    if(periodo==='mes')return d.getMonth()===hoje.getMonth()&&d.getFullYear()===hoje.getFullYear();
+    if(periodo==='30dias'){const ini=new Date(hoje);ini.setDate(hoje.getDate()-30);return d>=ini;}
+    if(periodo==='ano')return d.getFullYear()===hoje.getFullYear();
+    if(periodo==='custom'){
+      const ini=new Date(document.getElementById('rel-ini').value+'T00:00:00');
+      const fim=new Date(document.getElementById('rel-fim').value+'T23:59:59');
+      return d>=ini&&d<=fim;
+    }
+    return true;
+  });
+}
+window.previewRelatorio = function() {
+  const tipo=document.getElementById('rel-tipo').value;
+  const trab=getRelTrabalhos();
+  let html='';
+  if(tipo==='trabalhos'){
+    html=`<div class="table-wrap"><table>
+      <thead><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th></tr></thead>
+      <tbody>${trab.map(t=>`<tr><td>${t.nome}</td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td><td class="mono">${fmt(t.custoTotal)}</td><td class="mono">${fmt(t.precoVenda)}</td><td class="mono">${fmt((t.precoVenda||0)-(t.custoTotal||0))}</td><td>${t.status}</td></tr>`).join('')}</tbody>
+    </table></div>`;
+  } else if(tipo==='materiais'){
+    html=`<p style="margin-bottom:12px;font-weight:600">Filamentos</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Nome</th><th>Tipo</th><th>Preço</th><th>Custo/g</th><th>Estoque</th></tr></thead>
+      <tbody>${DB.filamentos.map(f=>`<tr><td>${f.nome}</td><td>${f.tipo}</td><td class="mono">${fmt(f.preco)}</td><td class="mono">${fmtG(f.custoPorGrama)}</td><td>${f.estoque}</td></tr>`).join('')}</tbody>
+    </table></div>
+    <p style="margin:16px 0 12px;font-weight:600">Insumos</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Nome</th><th>Categoria</th><th>Custo/un</th><th>Estoque</th></tr></thead>
+      <tbody>${DB.insumos.map(i=>`<tr><td>${i.nome}</td><td>${i.categoria}</td><td class="mono">${fmt(i.custoUn)}</td><td>${i.estoque} ${i.unidade}</td></tr>`).join('')}</tbody>
+    </table></div>`;
+  } else {
+    const rec=trab.reduce((a,t)=>a+(t.precoVenda||0),0);
+    const cst=trab.reduce((a,t)=>a+(t.custoTotal||0),0);
+    const luc=rec-cst;
+    html=`<div class="cards-grid">
+      <div class="card"><div class="card-label">Receita</div><div class="card-value blue">${fmt(rec)}</div></div>
+      <div class="card"><div class="card-label">Custos</div><div class="card-value red">${fmt(cst)}</div></div>
+      <div class="card"><div class="card-label">Lucro</div><div class="card-value ${luc>=0?'green':'red'}">${fmt(luc)}</div></div>
+      <div class="card"><div class="card-label">Margem</div><div class="card-value orange">${rec>0?(luc/rec*100).toFixed(1):'0'}%</div></div>
+    </div>`;
+  }
+  document.getElementById('relPreview').innerHTML=`<div class="section"><div class="section-header"><span class="section-title">Pré-visualização</span></div><div class="section-body">${html}</div></div>`;
+};
+window.exportExcel = function() {
+  const tipo=document.getElementById('rel-tipo').value;
+  const trab=getRelTrabalhos();
+  const wb=XLSX.utils.book_new();
+  if(tipo==='trabalhos'||tipo==='financeiro'){
+    const data=[['Trabalho','Cliente','Data','Custo','Venda','Lucro','Status'],
+      ...trab.map(t=>[t.nome,t.cliente||'',t.data||'',t.custoTotal||0,t.precoVenda||0,(t.precoVenda||0)-(t.custoTotal||0),t.status])];
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(data),'Trabalhos');
+  }
+  if(tipo==='materiais'){
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([['Nome','Marca','Tipo','Preço','Custo/g','Estoque'],...DB.filamentos.map(f=>[f.nome,f.marca||'',f.tipo,f.preco,f.custoPorGrama,f.estoque])]),'Filamentos');
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([['Nome','Categoria','Unidade','Custo/un','Estoque'],...DB.insumos.map(i=>[i.nome,i.categoria,i.unidade,i.custoUn,i.estoque])]),'Insumos');
+  }
+  XLSX.writeFile(wb,`PrintProfit_${tipo}_${new Date().toISOString().split('T')[0]}.xlsx`);
+  toast('Excel exportado!');
+};
+window.exportPDF = function() {
+  const tipo=document.getElementById('rel-tipo').value;
+  const trab=getRelTrabalhos();
+  const now=new Date().toLocaleDateString('pt-BR');
+  let tableHTML='';
+  if(tipo==='trabalhos'){
+    tableHTML=`<table border="1" style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead style="background:#f0f0f0"><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th></tr></thead>
+      <tbody>${trab.map(t=>`<tr><td>${t.nome}</td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td><td>${fmt(t.custoTotal)}</td><td>${fmt(t.precoVenda)}</td><td>${fmt((t.precoVenda||0)-(t.custoTotal||0))}</td><td>${t.status}</td></tr>`).join('')}</tbody></table>`;
+  } else if(tipo==='materiais'){
+    tableHTML=`<h3>Filamentos</h3><table border="1" style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead style="background:#f0f0f0"><tr><th>Nome</th><th>Tipo</th><th>Preço</th><th>Custo/g</th><th>Estoque</th></tr></thead>
+      <tbody>${DB.filamentos.map(f=>`<tr><td>${f.nome}</td><td>${f.tipo}</td><td>${fmt(f.preco)}</td><td>${fmtG(f.custoPorGrama)}</td><td>${f.estoque}</td></tr>`).join('')}</tbody></table>`;
+  } else {
+    const rec=trab.reduce((a,t)=>a+(t.precoVenda||0),0);
+    const cst=trab.reduce((a,t)=>a+(t.custoTotal||0),0);
+    tableHTML=`<table border="1" style="width:100%;border-collapse:collapse;font-size:14px">
+      <tr style="background:#f0f0f0"><th>Receita Total</th><td>${fmt(rec)}</td></tr>
+      <tr><th>Custos Totais</th><td>${fmt(cst)}</td></tr>
+      <tr style="background:#f0f0f0"><th>Lucro Total</th><td>${fmt(rec-cst)}</td></tr>
+      <tr><th>Margem</th><td>${rec>0?((rec-cst)/rec*100).toFixed(1):'0'}%</td></tr></table>`;
+  }
+  const win=window.open('','_blank');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Relatório Print Profit</title>
+    <style>body{font-family:Arial,sans-serif;padding:30px;color:#222}h1{color:#f97316}table th,table td{padding:6px 10px;text-align:left}</style>
+    </head><body><h1>🖨 Print Profit – ${DB.config.nomeNegocio}</h1>
+    <h2>Relatório: ${tipo} | Gerado em: ${now}</h2><hr style="margin:16px 0">
+    ${tableHTML}<p style="margin-top:30px;font-size:11px;color:#999">Gerado por Print Profit</p>
+    <script>window.onload=()=>window.print()<\/script></body></html>`);
+  win.document.close(); toast('PDF aberto para impressão!');
+};
+
+window.closeModal = closeModal;
+window.openModalFilamento = window.openModalFilamento;
+</script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+:root {
+  --bg:#0d1117; --bg2:#161b22; --bg3:#1f2733; --border:#2d3748;
+  --orange:#f97316; --orange2:#ea580c; --orange-glow:rgba(249,115,22,0.15);
+  --text:#e2e8f0; --text2:#94a3b8; --text3:#64748b;
+  --green:#22c55e; --red:#ef4444; --yellow:#eab308; --blue:#3b82f6;
+  --radius:10px; --radius-lg:16px;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+
+/* ── AUTH ── */
+#authScreen{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--bg);padding:20px;}
+.auth-box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:40px;width:min(420px,100%);box-shadow:0 20px 60px rgba(0,0,0,.5);}
+.auth-logo{text-align:center;margin-bottom:28px;}
+.auth-logo-title{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;color:var(--orange);}
+.auth-logo-sub{font-size:12px;color:var(--text3);margin-top:4px;}
+.auth-tabs{display:flex;background:var(--bg3);border-radius:var(--radius);padding:4px;margin-bottom:24px;}
+.auth-tab{flex:1;padding:8px;text-align:center;font-size:13px;font-weight:500;cursor:pointer;border-radius:8px;color:var(--text2);transition:all .2s;}
+.auth-tab.active{background:var(--orange);color:#fff;}
+.auth-field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px;}
+.auth-field label{font-size:12px;font-weight:500;color:var(--text2);}
+.auth-field input{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;color:var(--text);font-size:14px;font-family:inherit;transition:border-color .2s;}
+.auth-field input:focus{outline:none;border-color:var(--orange);}
+.auth-btn{width:100%;padding:11px;border-radius:var(--radius);font-size:14px;font-weight:600;cursor:pointer;border:none;transition:all .2s;margin-bottom:10px;}
+.auth-btn-primary{background:var(--orange);color:#fff;}
+.auth-btn-primary:hover{background:var(--orange2);}
+.auth-btn-google{background:var(--bg3);color:var(--text);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:10px;}
+.auth-btn-google:hover{border-color:var(--orange);color:var(--orange);}
+.auth-divider{text-align:center;font-size:12px;color:var(--text3);margin:12px 0;position:relative;}
+.auth-divider::before,.auth-divider::after{content:'';position:absolute;top:50%;width:42%;height:1px;background:var(--border);}
+.auth-divider::before{left:0;} .auth-divider::after{right:0;}
+.auth-forgot{text-align:right;font-size:12px;color:var(--orange);cursor:pointer;margin-top:-8px;margin-bottom:14px;}
+.auth-forgot:hover{text-decoration:underline;}
+.auth-error{background:rgba(239,68,68,.1);border:1px solid var(--red);color:var(--red);padding:10px 14px;border-radius:var(--radius);font-size:13px;margin-bottom:14px;display:none;}
+.auth-success{background:rgba(34,197,94,.1);border:1px solid var(--green);color:var(--green);padding:10px 14px;border-radius:var(--radius);font-size:13px;margin-bottom:14px;display:none;}
+
+/* ── APP ── */
+#appScreen{display:none;min-height:100vh;}
+#sidebar{width:220px;min-height:100vh;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;transition:transform .3s;}
+.logo{padding:20px 18px 16px;border-bottom:1px solid var(--border);}
+.logo-title{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:var(--orange);}
+.logo-sub{font-size:10px;color:var(--text3);margin-top:2px;}
+nav{flex:1;padding:12px 0;overflow-y:auto;}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 18px;cursor:pointer;font-size:13px;color:var(--text2);border-left:3px solid transparent;transition:all .2s;user-select:none;}
+.nav-item:hover{color:var(--text);background:var(--bg3);}
+.nav-item.active{color:var(--orange);border-left-color:var(--orange);background:var(--orange-glow);}
+.nav-icon{font-size:16px;width:20px;text-align:center;}
+.nav-badge{margin-left:auto;background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;}
+.sidebar-user{padding:14px 18px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;}
+.user-avatar{width:32px;height:32px;border-radius:50%;background:var(--orange);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;flex-shrink:0;}
+.user-email{font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
+.logout-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:2px;}
+.logout-btn:hover{color:var(--red);}
+#main{margin-left:220px;flex:1;min-height:100vh;display:flex;flex-direction:column;}
+header{background:var(--bg2);border-bottom:1px solid var(--border);padding:14px 28px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
+.header-title{font-size:16px;font-weight:600;}
+.currency-badge{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;background:var(--orange-glow);color:var(--orange);border:1px solid var(--orange);padding:3px 10px;border-radius:20px;}
+.burger{display:none;background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;}
+#content{padding:28px;flex:1;}
+.page{display:none;} .page.active{display:block;}
+.cards-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;}
+.card-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;}
+.card-value{font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:600;}
+.card-value.green{color:var(--green);} .card-value.red{color:var(--red);} .card-value.orange{color:var(--orange);} .card-value.blue{color:var(--blue);}
+.card-sub{font-size:11px;color:var(--text3);margin-top:4px;}
+.section{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);margin-bottom:24px;overflow:hidden;}
+.section-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.section-title{font-size:14px;font-weight:600;}
+.section-body{padding:20px;}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius);font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .2s;}
+.btn-primary{background:var(--orange);color:#fff;} .btn-primary:hover{background:var(--orange2);}
+.btn-secondary{background:var(--bg3);color:var(--text);border:1px solid var(--border);} .btn-secondary:hover{border-color:var(--orange);color:var(--orange);}
+.btn-danger{background:rgba(239,68,68,.15);color:var(--red);border:1px solid var(--red);} .btn-danger:hover{background:var(--red);color:#fff;}
+.btn-sm{padding:5px 10px;font-size:12px;} .btn-ghost{background:none;color:var(--text2);border:1px solid var(--border);}
+.btn-ghost:hover{color:var(--text);} .btn-green{background:rgba(34,197,94,.15);color:var(--green);border:1px solid var(--green);}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+.form-grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;}
+.form-full{grid-column:1/-1;}
+.field{display:flex;flex-direction:column;gap:6px;}
+.field label{font-size:12px;font-weight:500;color:var(--text2);}
+.field input,.field select,.field textarea{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:9px 12px;color:var(--text);font-size:13px;font-family:inherit;transition:border-color .2s;width:100%;}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--orange);}
+.field select option{background:var(--bg3);} .field textarea{resize:vertical;min-height:80px;}
+.tabs{display:flex;gap:4px;margin-bottom:20px;flex-wrap:wrap;}
+.tab{padding:7px 16px;border-radius:20px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid var(--border);color:var(--text2);background:var(--bg2);transition:all .2s;}
+.tab.active{background:var(--orange);color:#fff;border-color:var(--orange);}
+.tab:hover:not(.active){border-color:var(--orange);color:var(--orange);}
+.table-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th{text-align:left;padding:10px 14px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--text3);border-bottom:1px solid var(--border);}
+td{padding:12px 14px;border-bottom:1px solid rgba(45,55,72,.5);color:var(--text);vertical-align:middle;}
+tr:last-child td{border-bottom:none;} tr:hover td{background:rgba(255,255,255,.02);}
+.badge{display:inline-block;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;}
+.badge-orange{background:var(--orange-glow);color:var(--orange);} .badge-green{background:rgba(34,197,94,.15);color:var(--green);}
+.badge-red{background:rgba(239,68,68,.15);color:var(--red);} .badge-blue{background:rgba(59,130,246,.15);color:var(--blue);}
+.badge-yellow{background:rgba(234,179,8,.15);color:var(--yellow);} .badge-gray{background:var(--bg3);color:var(--text2);}
+.alert{padding:12px 16px;border-radius:var(--radius);font-size:13px;margin-bottom:16px;border-left:3px solid;}
+.alert-warn{background:rgba(234,179,8,.1);border-color:var(--yellow);color:var(--yellow);}
+.alert-danger{background:rgba(239,68,68,.1);border-color:var(--red);color:var(--red);}
+.alert-success{background:rgba(34,197,94,.1);border-color:var(--green);color:var(--green);}
+.alert-info{background:rgba(59,130,246,.1);border-color:var(--blue);color:var(--blue);}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;align-items:center;justify-content:center;}
+.modal-overlay.open{display:flex;}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:28px;width:min(680px,95vw);max-height:90vh;overflow-y:auto;}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;}
+.modal-title{font-size:16px;font-weight:700;}
+.modal-close{background:none;border:none;color:var(--text2);font-size:20px;cursor:pointer;}
+.modal-close:hover{color:var(--text);}
+.fil-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;}
+.fil-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+.fil-dot{width:12px;height:12px;border-radius:50%;display:inline-block;margin-right:8px;border:2px solid rgba(255,255,255,.2);}
+.chart-container{position:relative;height:260px;}
+.period-pills{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;}
+.pill{padding:6px 14px;border-radius:20px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid var(--border);color:var(--text2);background:var(--bg2);transition:all .2s;}
+.pill.active{background:var(--orange);color:#fff;border-color:var(--orange);}
+.pill:hover:not(.active){border-color:var(--orange);color:var(--orange);}
+.calc-result{background:linear-gradient(135deg,var(--bg3) 0%,rgba(249,115,22,.05) 100%);border:1px solid var(--orange);border-radius:var(--radius-lg);padding:24px;}
+.calc-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.calc-row:last-child{border-bottom:none;}
+.calc-row.total{font-size:18px;font-weight:700;color:var(--orange);padding-top:14px;}
+.calc-label{color:var(--text2);} .calc-value{font-family:'JetBrains Mono',monospace;font-weight:600;}
+.toggle-wrap{display:flex;align-items:center;gap:10px;cursor:pointer;}
+.toggle{width:40px;height:22px;background:var(--bg3);border:1px solid var(--border);border-radius:11px;position:relative;transition:background .2s;cursor:pointer;}
+.toggle.on{background:var(--orange);border-color:var(--orange);}
+.toggle::after{content:'';position:absolute;width:16px;height:16px;background:#fff;border-radius:50%;top:2px;left:2px;transition:transform .2s;}
+.toggle.on::after{transform:translateX(18px);}
+.toggle-label{font-size:13px;color:var(--text2);user-select:none;}
+.empty{text-align:center;padding:50px 20px;color:var(--text3);}
+.empty-icon{font-size:48px;margin-bottom:12px;opacity:.4;}
+.empty-text{font-size:14px;margin-bottom:8px;}
+input[type=range]{-webkit-appearance:none;width:100%;height:6px;background:var(--bg3);border-radius:3px;outline:none;}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;background:var(--orange);border-radius:50%;cursor:pointer;}
+.breakdown{background:var(--bg3);border-radius:var(--radius);padding:14px;margin-top:12px;}
+.breakdown-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;color:var(--text2);}
+.breakdown-row.total{font-size:14px;font-weight:700;color:var(--text);border-top:1px solid var(--border);margin-top:6px;padding-top:10px;}
+.stock-low{color:var(--red);} .stock-ok{color:var(--green);}
+.separator{border:none;border-top:1px solid var(--border);margin:20px 0;}
+.flex{display:flex;} .items-center{align-items:center;} .gap-8{gap:8px;} .gap-12{gap:12px;}
+.mb-16{margin-bottom:16px;} .mb-8{margin-bottom:8px;} .mt-16{margin-top:16px;}
+.text-sm{font-size:12px;color:var(--text3);} .mono{font-family:'JetBrains Mono',monospace;}
+.fw-600{font-weight:600;} .text-orange{color:var(--orange);}
+.overlay-sidebar{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;}
+.overlay-sidebar.open{display:block;}
+#loadingOverlay{position:fixed;inset:0;background:rgba(13,17,23,.9);z-index:999;display:none;align-items:center;justify-content:center;flex-direction:column;gap:16px;}
+.loading-spinner{width:40px;height:40px;border:3px solid var(--border);border-top-color:var(--orange);border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+#toast{position:fixed;bottom:24px;right:24px;z-index:9999;display:none;}
+#toastMsg{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,.4);}
+@media(max-width:768px){
+  #sidebar{transform:translateX(-100%);}
+  #sidebar.open{transform:translateX(0);}
+  #main{margin-left:0;}
+  .burger{display:block;}
+  .form-grid,.form-grid-3{grid-template-columns:1fr;}
+  .cards-grid{grid-template-columns:1fr 1fr;}
+  #content{padding:16px;}
+  #dashGridBottom{grid-template-columns:1fr!important;}
+}
+@media(max-width:480px){.cards-grid{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+
+<!-- LOADING -->
+<div id="loadingOverlay">
+  <div class="loading-spinner"></div>
+  <div style="color:var(--text2);font-size:13px">Carregando seus dados...</div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"><div id="toastMsg"></div></div>
+
+<!-- ══════════════════════════════════════════ -->
+<!--  TELA DE LOGIN                            -->
+<!-- ══════════════════════════════════════════ -->
+<div id="authScreen">
+  <div class="auth-box">
+    <div class="auth-logo">
+      <div class="auth-logo-title">🖨 PRINT PROFIT</div>
+      <div class="auth-logo-sub">Gestão de Impressão 3D</div>
+    </div>
+    <div class="auth-tabs">
+      <div class="auth-tab active" id="authTabLogin" onclick="showAuthForm('login')">Entrar</div>
+      <div class="auth-tab" id="authTabRegister" onclick="showAuthForm('register')">Criar Conta</div>
+    </div>
+    <div id="authError" class="auth-error"></div>
+
+    <!-- Login -->
+    <div id="formLogin">
+      <div class="auth-field">
+        <label>Email</label>
+        <input type="email" id="authEmail" placeholder="seu@email.com" onkeydown="if(event.key==='Enter')authLogin()">
+      </div>
+      <div class="auth-field">
+        <label>Senha</label>
+        <input type="password" id="authPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')authLogin()">
+      </div>
+      <div class="auth-forgot" onclick="authResetPassword()">Esqueci minha senha</div>
+      <button class="auth-btn auth-btn-primary" onclick="authLogin()">Entrar</button>
+      <div class="auth-divider">ou</div>
+      <button class="auth-btn auth-btn-google" onclick="authGoogle()">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        Continuar com Google
+      </button>
+    </div>
+
+    <!-- Registro -->
+    <div id="formRegister" style="display:none">
+      <div class="auth-field">
+        <label>Email</label>
+        <input type="email" id="authEmailReg" placeholder="seu@email.com" oninput="document.getElementById('authEmail').value=this.value">
+      </div>
+      <div class="auth-field">
+        <label>Senha</label>
+        <input type="password" id="authPass" placeholder="Mínimo 6 caracteres">
+      </div>
+      <div class="auth-field">
+        <label>Confirmar Senha</label>
+        <input type="password" id="authPass2" placeholder="Repita a senha" onkeydown="if(event.key==='Enter')authRegister()">
+      </div>
+      <button class="auth-btn auth-btn-primary" onclick="authRegister()">Criar Conta</button>
+      <div class="auth-divider">ou</div>
+      <button class="auth-btn auth-btn-google" onclick="authGoogle()">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        Continuar com Google
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════ -->
+<!--  APP                                       -->
+<!-- ══════════════════════════════════════════ -->
+<div id="appScreen" style="display:none;width:100%">
+  <div class="overlay-sidebar" id="overlayBg" onclick="closeSidebar()"></div>
+
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <div class="logo">
+      <div class="logo-title">🖨 PRINT PROFIT</div>
+      <div class="logo-sub">Gestão de Impressão 3D</div>
+    </div>
+    <nav>
+      <div class="nav-item" data-page="dashboard" onclick="goTo('dashboard')"><span class="nav-icon">📊</span> Dashboard</div>
+      <div class="nav-item" data-page="trabalhos" onclick="goTo('trabalhos')"><span class="nav-icon">🗂</span> Trabalhos</div>
+      <div class="nav-item" data-page="novo-trabalho" onclick="goTo('novo-trabalho')"><span class="nav-icon">➕</span> Novo Trabalho</div>
+      <div class="nav-item" data-page="calculadora" onclick="goTo('calculadora')"><span class="nav-icon">🧮</span> Calculadora</div>
+      <div class="nav-item" data-page="materiais" onclick="goTo('materiais')"><span class="nav-icon">🧵</span> Materiais<span class="nav-badge" id="badge-materiais" style="display:none">!</span></div>
+      <div class="nav-item" data-page="insumos" onclick="goTo('insumos')"><span class="nav-icon">📦</span> Insumos<span class="nav-badge" id="badge-insumos" style="display:none">!</span></div>
+      <div class="nav-item" data-page="impressoras" onclick="goTo('impressoras')"><span class="nav-icon">🖨️</span> Impressoras</div>
+      <div class="nav-item" data-page="relatorios" onclick="goTo('relatorios')"><span class="nav-icon">📁</span> Relatórios</div>
+      <div class="nav-item" data-page="configuracoes" onclick="goTo('configuracoes')"><span class="nav-icon">⚙️</span> Configurações</div>
+    </nav>
+    <div class="sidebar-user">
+      <div class="user-avatar" id="userAvatar">?</div>
+      <div class="user-email" id="userEmail"></div>
+      <button class="logout-btn" onclick="authLogout()" title="Sair">⏻</button>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div id="main">
+    <header>
+      <div class="flex items-center gap-12">
+        <button class="burger" onclick="toggleSidebar()">☰</button>
+        <span class="header-title" id="headerTitle">Dashboard</span>
+      </div>
+      <div class="flex items-center gap-12">
+        <div class="currency-badge" id="currencyBadge">€ EUR</div>
+      </div>
+    </header>
+
+    <div id="content">
+
+      <!-- DASHBOARD -->
+      <div class="page active" id="page-dashboard">
+        <div id="dash-alerts"></div>
+        <div class="period-pills" id="periodPills">
+          <span class="pill active" onclick="setPeriod('hoje',this)">Hoje</span>
+          <span class="pill" onclick="setPeriod('semana',this)">Esta Semana</span>
+          <span class="pill" onclick="setPeriod('mes',this)">Este Mês</span>
+          <span class="pill" onclick="setPeriod('30dias',this)">Últimos 30 dias</span>
+          <span class="pill" onclick="setPeriod('ano',this)">Este Ano</span>
+          <span class="pill" onclick="setPeriod('todos',this)">Todos</span>
+        </div>
+        <div class="cards-grid" id="dashCards"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" id="dashGridBottom">
+          <div class="section">
+            <div class="section-header">
+              <span class="section-title">📈 Receita vs Custos</span>
+              <select id="chartGroup" onchange="renderDashChart()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:12px">
+                <option value="mes">Por Mês</option>
+                <option value="semana">Por Semana</option>
+                <option value="dia">Por Dia</option>
+              </select>
+            </div>
+            <div class="section-body"><div class="chart-container"><canvas id="dashChart"></canvas></div></div>
+          </div>
+          <div class="section">
+            <div class="section-header"><span class="section-title">🗂 Trabalhos Recentes</span></div>
+            <div class="section-body" style="padding:0"><div id="dashRecentJobs"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TRABALHOS -->
+      <div class="page" id="page-trabalhos">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Todos os Trabalhos</span>
+            <div class="flex gap-8">
+              <select id="filtroStatus" onchange="renderTrabalhos()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px">
+                <option value="">Todos os Status</option>
+                <option>Pendente</option><option>Em andamento</option>
+                <option>Concluído</option><option>Entregue</option>
+              </select>
+              <button class="btn btn-primary btn-sm" onclick="goTo('novo-trabalho')">+ Novo</button>
+            </div>
+          </div>
+          <div class="section-body" style="padding:0">
+            <div class="table-wrap"><table>
+              <thead><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th><th></th></tr></thead>
+              <tbody id="tabelaTrabalhos"></tbody>
+            </table></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- NOVO TRABALHO -->
+      <div class="page" id="page-novo-trabalho">
+        <div class="section">
+          <div class="section-header"><span class="section-title" id="formTrabalhoTitle">Novo Trabalho</span></div>
+          <div class="section-body">
+            <div class="form-grid mb-16">
+              <div class="field"><label>Nome do Trabalho</label><input id="tj-nome" placeholder="Ex: Miniatura Dragão"></div>
+              <div class="field"><label>Cliente</label><input id="tj-cliente" placeholder="Nome do cliente"></div>
+              <div class="field"><label>Data</label><input type="date" id="tj-data"></div>
+              <div class="field"><label>Impressora</label><select id="tj-impressora"><option value="">Selecionar...</option></select></div>
+              <div class="field"><label>Tempo de Impressão (h)</label><input type="number" id="tj-tempo-h" min="0" step="0.5" placeholder="0" oninput="calcTrabalho()"></div>
+              <div class="field"><label>Tempo de Impressão (min)</label><input type="number" id="tj-tempo-m" min="0" max="59" placeholder="0" oninput="calcTrabalho()"></div>
+              <div class="field"><label>Taxa de Falha (%)</label><input type="number" id="tj-falha" min="0" max="100" placeholder="0" oninput="calcTrabalho()"></div>
+              <div class="field"><label>Pós-processamento (min)</label><input type="number" id="tj-pos" min="0" placeholder="0" oninput="calcTrabalho()"></div>
+              <div class="field"><label>Custo de Frete</label><input type="number" id="tj-frete" min="0" step="0.01" placeholder="0.00" oninput="calcTrabalho()"></div>
+              <div class="field"><label>Status</label>
+                <select id="tj-status"><option>Pendente</option><option>Em andamento</option><option>Concluído</option><option>Entregue</option></select>
+              </div>
+              <div class="field form-full"><label>Observações</label><textarea id="tj-obs" placeholder="Notas adicionais..."></textarea></div>
+            </div>
+            <div class="section-header" style="background:var(--bg3);border-radius:var(--radius);padding:12px 16px;margin-bottom:12px">
+              <span class="section-title" style="font-size:13px">🎨 Filamentos Utilizados</span>
+              <button class="btn btn-secondary btn-sm" onclick="addFilamentoRow()">+ Filamento</button>
+            </div>
+            <div id="filamentosContainer"></div>
+            <hr class="separator">
+            <div class="section-header" style="background:var(--bg3);border-radius:var(--radius);padding:12px 16px;margin-bottom:12px">
+              <span class="section-title" style="font-size:13px">📦 Insumos Utilizados</span>
+              <button class="btn btn-secondary btn-sm" onclick="addInsumoRow()">+ Insumo</button>
+            </div>
+            <div id="insumosContainer"></div>
+            <hr class="separator">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+              <div>
+                <div class="section-title mb-8" style="font-size:13px">📋 Breakdown de Custos</div>
+                <div class="breakdown" id="breakdownTrabalho"></div>
+              </div>
+              <div>
+                <div class="section-title mb-8" style="font-size:13px">💰 Precificação</div>
+                <div class="breakdown">
+                  <div class="field mb-16">
+                    <label>Margem de Lucro: <span id="margemLabel">40</span>%</label>
+                    <input type="range" id="tj-margem" min="0" max="200" value="40" oninput="document.getElementById('margemLabel').textContent=this.value;calcTrabalho()">
+                  </div>
+                  <div class="field mb-16">
+                    <label>Taxa de Marketplace (%)</label>
+                    <input type="number" id="tj-marketplace" min="0" max="50" step="0.1" placeholder="0" oninput="calcTrabalho()">
+                  </div>
+                  <div class="toggle-wrap mb-16" onclick="toggleTax()">
+                    <div class="toggle" id="taxToggle"></div>
+                    <span class="toggle-label" id="taxToggleLabel">Aplicar IVA (23%)</span>
+                  </div>
+                  <div class="field">
+                    <label>Preço de Venda Final</label>
+                    <input type="number" id="tj-preco-venda" step="0.01" placeholder="0.00">
+                  </div>
+                </div>
+                <div class="breakdown mt-16" id="precoResult"></div>
+              </div>
+            </div>
+            <hr class="separator">
+            <div class="flex gap-8">
+              <button class="btn btn-primary" onclick="salvarTrabalho()">💾 Salvar Trabalho</button>
+              <button class="btn btn-ghost" onclick="limparFormTrabalho()">Limpar</button>
+              <button class="btn btn-ghost" onclick="goTo('trabalhos')" style="margin-left:auto">Cancelar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CALCULADORA -->
+      <div class="page" id="page-calculadora">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+          <div class="section">
+            <div class="section-header"><span class="section-title">🧮 Entradas</span>
+              <button class="btn btn-ghost btn-sm" onclick="limparCalc()">Limpar</button>
+            </div>
+            <div class="section-body">
+              <div class="form-grid mb-16">
+                <div class="field"><label>Custo de Filamento</label><input type="number" id="c-fil" step="0.01" placeholder="0.00" oninput="calcCalc()"></div>
+                <div class="field"><label>Ou selecionar material</label><select id="c-mat" onchange="calcMatCalc()"><option value="">Manual</option></select></div>
+                <div class="field"><label>Peso usado (g)</label><input type="number" id="c-peso" step="0.1" placeholder="0" oninput="calcMatCalc()"></div>
+                <div class="field"><label>Impressora</label><select id="c-imp" onchange="calcCalc()"><option value="">Nenhuma</option></select></div>
+                <div class="field"><label>Tempo de Impressão (h)</label><input type="number" id="c-tempo-h" step="0.5" placeholder="0" oninput="calcCalc()"></div>
+                <div class="field"><label>Tempo de Impressão (min)</label><input type="number" id="c-tempo-m" max="59" placeholder="0" oninput="calcCalc()"></div>
+                <div class="field"><label>Custo de Insumos</label><input type="number" id="c-insumos" step="0.01" placeholder="0.00" oninput="calcCalc()"></div>
+                <div class="field"><label>Custo de Frete</label><input type="number" id="c-frete" step="0.01" placeholder="0.00" oninput="calcCalc()"></div>
+                <div class="field"><label>Mão de Obra (por hora)</label><input type="number" id="c-mao-h" step="0.01" placeholder="0.00" oninput="calcCalc()"></div>
+                <div class="field"><label>Pós-processamento (min)</label><input type="number" id="c-mao-min" placeholder="0" oninput="calcCalc()"></div>
+              </div>
+              <div class="field mb-16">
+                <label>Margem de Lucro: <span id="cMargemLabel">40</span>%</label>
+                <input type="range" id="c-margem" min="0" max="200" value="40" oninput="document.getElementById('cMargemLabel').textContent=this.value;calcCalc()">
+              </div>
+              <div class="field mb-16"><label>Taxa de Marketplace (%)</label><input type="number" id="c-marketplace" step="0.1" placeholder="0" oninput="calcCalc()"></div>
+              <div class="toggle-wrap mb-16" onclick="toggleCalcTax()">
+                <div class="toggle" id="calcTaxToggle"></div>
+                <span class="toggle-label" id="calcTaxLabel">Aplicar IVA (23%)</span>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="calc-result" id="calcResult">
+              <div class="section-title mb-16" style="font-size:14px;color:var(--orange)">💡 Resultado em Tempo Real</div>
+              <div id="calcRows"></div>
+            </div>
+            <div class="mt-16 flex gap-8">
+              <button class="btn btn-primary" onclick="salvarComoTrabalho()">📋 Salvar como Trabalho</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MATERIAIS -->
+      <div class="page" id="page-materiais">
+        <div class="section-header" style="background:none;padding:0;margin-bottom:16px">
+          <span></span>
+          <button class="btn btn-primary" onclick="openModalFilamento()">+ Novo Filamento</button>
+        </div>
+        <div id="alertsMateriais"></div>
+        <div class="section">
+          <div class="section-header"><span class="section-title">🧵 Filamentos Cadastrados</span></div>
+          <div class="section-body" style="padding:0">
+            <div class="table-wrap"><table>
+              <thead><tr><th>Nome</th><th>Marca</th><th>Tipo</th><th>Cor</th><th>Peso Carretel</th><th>Preço</th><th>Custo/g</th><th>Estoque</th><th></th></tr></thead>
+              <tbody id="tabelaFilamentos"></tbody>
+            </table></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- INSUMOS -->
+      <div class="page" id="page-insumos">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
+          <div class="tabs" id="tabsInsumos" style="margin-bottom:0">
+            <span class="tab active" onclick="filterInsumos('',this)">Todos</span>
+            <span class="tab" onclick="filterInsumos('Embalagem',this)">Embalagem</span>
+            <span class="tab" onclick="filterInsumos('Proteção',this)">Proteção</span>
+            <span class="tab" onclick="filterInsumos('Fixação',this)">Fixação</span>
+            <span class="tab" onclick="filterInsumos('Etiquetas',this)">Etiquetas</span>
+            <span class="tab" onclick="filterInsumos('Acabamento',this)">Acabamento</span>
+            <span class="tab" onclick="filterInsumos('Componentes',this)">Componentes</span>
+          </div>
+          <button class="btn btn-primary" onclick="openModalInsumo()">+ Novo Insumo</button>
+        </div>
+        <div id="alertsInsumos"></div>
+        <div class="section">
+          <div class="section-header"><span class="section-title">📦 Insumos Cadastrados</span></div>
+          <div class="section-body" style="padding:0">
+            <div class="table-wrap"><table>
+              <thead><tr><th>Nome</th><th>Categoria</th><th>Unidade</th><th>Custo/un</th><th>Estoque</th><th>Mínimo</th><th>Fornecedor</th><th></th></tr></thead>
+              <tbody id="tabelaInsumos"></tbody>
+            </table></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- IMPRESSORAS -->
+      <div class="page" id="page-impressoras">
+        <div class="section-header" style="background:none;padding:0;margin-bottom:16px">
+          <span></span>
+          <button class="btn btn-primary" onclick="openModalImpressora()">+ Nova Impressora</button>
+        </div>
+        <div class="section">
+          <div class="section-header"><span class="section-title">🖨️ Impressoras Cadastradas</span></div>
+          <div class="section-body" style="padding:0">
+            <div class="table-wrap"><table>
+              <thead><tr><th>Modelo</th><th>Preço</th><th>Vida Útil</th><th>Consumo</th><th>Depreciação/h</th><th>Custo Elétrico/h</th><th></th></tr></thead>
+              <tbody id="tabelaImpressoras"></tbody>
+            </table></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RELATÓRIOS -->
+      <div class="page" id="page-relatorios">
+        <div class="section">
+          <div class="section-header"><span class="section-title">📁 Exportar Relatório</span></div>
+          <div class="section-body">
+            <div class="form-grid mb-16">
+              <div class="field"><label>Período</label>
+                <select id="rel-periodo" onchange="toggleCustomPeriod()">
+                  <option value="hoje">Hoje</option><option value="semana">Esta Semana</option>
+                  <option value="mes">Este Mês</option><option value="30dias">Últimos 30 dias</option>
+                  <option value="ano">Este Ano</option><option value="todos">Todos</option>
+                  <option value="custom">Personalizado</option>
+                </select>
+              </div>
+              <div class="field"><label>Tipo de Relatório</label>
+                <select id="rel-tipo">
+                  <option value="trabalhos">Trabalhos / Impressões</option>
+                  <option value="materiais">Materiais e Insumos</option>
+                  <option value="financeiro">Resumo Financeiro</option>
+                </select>
+              </div>
+              <div class="field" id="relDataIni" style="display:none"><label>Data Inicial</label><input type="date" id="rel-ini"></div>
+              <div class="field" id="relDataFim" style="display:none"><label>Data Final</label><input type="date" id="rel-fim"></div>
+            </div>
+            <div class="flex gap-8 mb-16">
+              <button class="btn btn-secondary" onclick="previewRelatorio()">👁 Pré-visualizar</button>
+              <button class="btn btn-green" onclick="exportExcel()">📊 Exportar Excel</button>
+              <button class="btn btn-primary" onclick="exportPDF()">📄 Exportar PDF</button>
+            </div>
+            <div id="relPreview"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONFIGURAÇÕES -->
+      <div class="page" id="page-configuracoes">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+          <div class="section">
+            <div class="section-header"><span class="section-title">💱 Moeda & Região</span></div>
+            <div class="section-body">
+              <div class="field mb-16"><label>Moeda</label>
+                <select id="cfg-moeda">
+                  <option value="EUR">Euro (€)</option>
+                  <option value="BRL">Real (R$)</option>
+                  <option value="USD">Dólar ($)</option>
+                </select>
+              </div>
+              <div class="alert alert-info" style="font-size:12px">⚡ Ao alterar a moeda, todos os valores no app são atualizados. Os números <strong>não são convertidos</strong> — apenas o símbolo muda.</div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-header"><span class="section-title">🧾 Impostos</span></div>
+            <div class="section-body">
+              <div class="field mb-16"><label>Nome do Imposto</label><input id="cfg-imposto-nome" placeholder="Ex: IVA, ICMS, Sales Tax"></div>
+              <div class="field mb-16"><label>Alíquota (%)</label><input type="number" id="cfg-imposto-taxa" min="0" max="100" step="0.1"></div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-header"><span class="section-title">⚡ Energia & Mão de Obra</span></div>
+            <div class="section-body">
+              <div class="field mb-16"><label>Preço da Eletricidade (por kWh)</label><input type="number" id="cfg-kwh" step="0.001"></div>
+              <div class="field mb-16"><label>Taxa de Mão de Obra (por hora)</label><input type="number" id="cfg-mao" step="0.01"></div>
+              <div class="field"><label>Margem de Lucro Padrão (%)</label><input type="number" id="cfg-margem" step="1"></div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-header"><span class="section-title">🏢 Negócio</span></div>
+            <div class="section-body">
+              <div class="field"><label>Nome do Negócio</label><input id="cfg-nome" placeholder="Seu negócio"></div>
+            </div>
+          </div>
+        </div>
+        <div class="flex gap-8 mt-16">
+          <button class="btn btn-primary" onclick="salvarConfigExplicito()">💾 Salvar Configurações</button>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main -->
+</div><!-- /appScreen -->
+
+<!-- MODAIS -->
+<div class="modal-overlay" id="modalFilamento">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">🧵 Cadastrar Filamento</span><button class="modal-close" onclick="closeModal('modalFilamento')">✕</button></div>
+    <div class="form-grid">
+      <div class="field"><label>Nome</label><input id="f-nome" placeholder="Ex: PLA Silk Red"></div>
+      <div class="field"><label>Marca</label><input id="f-marca" placeholder="Ex: Bambu Lab"></div>
+      <div class="field"><label>Tipo</label>
+        <select id="f-tipo"><option>PLA</option><option>PLA+</option><option>PETG</option><option>ABS</option><option>ASA</option><option>TPU</option><option>Nylon</option><option>PC</option><option>Resina</option><option>Outro</option></select>
+      </div>
+      <div class="field"><label>Cor</label><input id="f-cor" placeholder="Ex: Vermelho Metálico"></div>
+      <div class="field"><label>Peso do Carretel (g)</label><input type="number" id="f-peso" placeholder="1000" oninput="calcCustoGrama()"></div>
+      <div class="field"><label>Preço de Compra</label><input type="number" id="f-preco" step="0.01" placeholder="0.00" oninput="calcCustoGrama()"></div>
+      <div class="field"><label>Custo por Grama (automático)</label><input id="f-custo-g" readonly style="background:var(--bg);color:var(--orange)" placeholder="0.000"></div>
+      <div class="field"><label>Estoque (carretéis)</label><input type="number" id="f-estoque" placeholder="1" min="0"></div>
+      <div class="field"><label>Estoque Mínimo</label><input type="number" id="f-estoque-min" placeholder="1" min="0"></div>
+      <div class="field"><label>Fornecedor</label><input id="f-fornecedor" placeholder="Nome do fornecedor"></div>
+      <div class="field"><label>Data de Compra</label><input type="date" id="f-data"></div>
+    </div>
+    <input type="hidden" id="f-edit-id">
+    <div class="flex gap-8 mt-16">
+      <button class="btn btn-primary" onclick="salvarFilamento()">💾 Salvar</button>
+      <button class="btn btn-ghost" onclick="closeModal('modalFilamento')">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modalInsumo">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">📦 Cadastrar Insumo</span><button class="modal-close" onclick="closeModal('modalInsumo')">✕</button></div>
+    <div class="form-grid">
+      <div class="field form-full"><label>Nome</label><input id="i-nome" placeholder="Ex: Caixa papelão pequena"></div>
+      <div class="field"><label>Categoria</label>
+        <select id="i-cat"><option>Embalagem</option><option>Proteção</option><option>Fixação</option><option>Etiquetas e Impressão</option><option>Acabamento</option><option>Componentes / Acessórios</option><option>Outros</option></select>
+      </div>
+      <div class="field"><label>Unidade</label>
+        <select id="i-unidade"><option>un</option><option>m</option><option>cm</option><option>g</option><option>ml</option><option>rolo</option><option>pacote</option><option>folha</option></select>
+      </div>
+      <div class="field"><label>Quantidade Comprada</label><input type="number" id="i-qtd" placeholder="1" oninput="calcCustoInsumo()"></div>
+      <div class="field"><label>Preço Total de Compra</label><input type="number" id="i-preco" step="0.01" placeholder="0.00" oninput="calcCustoInsumo()"></div>
+      <div class="field"><label>Custo por Unidade (automático)</label><input id="i-custo-un" readonly style="background:var(--bg);color:var(--orange)" placeholder="0.00"></div>
+      <div class="field"><label>Estoque Atual</label><input type="number" id="i-estoque" placeholder="0" min="0"></div>
+      <div class="field"><label>Estoque Mínimo</label><input type="number" id="i-estoque-min" placeholder="0" min="0"></div>
+      <div class="field"><label>Fornecedor</label><input id="i-fornecedor" placeholder="Nome do fornecedor"></div>
+      <div class="field"><label>Data de Compra</label><input type="date" id="i-data"></div>
+      <div class="field form-full"><label>Observações</label><textarea id="i-obs" rows="2"></textarea></div>
+    </div>
+    <input type="hidden" id="i-edit-id">
+    <div class="flex gap-8 mt-16">
+      <button class="btn btn-primary" onclick="salvarInsumo()">💾 Salvar</button>
+      <button class="btn btn-ghost" onclick="closeModal('modalInsumo')">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modalImpressora">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">🖨️ Cadastrar Impressora</span><button class="modal-close" onclick="closeModal('modalImpressora')">✕</button></div>
+    <div class="form-grid">
+      <div class="field form-full"><label>Modelo</label><input id="imp-nome" placeholder="Ex: Bambu Lab P2S"></div>
+      <div class="field"><label>Preço de Compra</label><input type="number" id="imp-preco" step="0.01" placeholder="0.00" oninput="calcDepreciacao()"></div>
+      <div class="field"><label>Vida Útil (horas)</label><input type="number" id="imp-vida" placeholder="5000" oninput="calcDepreciacao()"></div>
+      <div class="field"><label>Consumo (W)</label><input type="number" id="imp-potencia" placeholder="350" oninput="calcDepreciacao()"></div>
+      <div class="field"><label>Depreciação/h (automático)</label><input id="imp-dep" readonly style="background:var(--bg);color:var(--orange)" placeholder="0.00"></div>
+      <div class="field"><label>Custo Elétrico/h (automático)</label><input id="imp-eletrico" readonly style="background:var(--bg);color:var(--orange)" placeholder="0.00"></div>
+    </div>
+    <input type="hidden" id="imp-edit-id">
+    <div class="flex gap-8 mt-16">
+      <button class="btn btn-primary" onclick="salvarImpressora()">💾 Salvar</button>
+      <button class="btn btn-ghost" onclick="closeModal('modalImpressora')">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

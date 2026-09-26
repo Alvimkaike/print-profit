@@ -51,6 +51,7 @@ let insumoFilter = '';
 let editTrabalhoId = null;
 let taxToggleOn = false;
 let calcTaxOn = false;
+let atacadoOn = false;
 let dashChartInstance = null;
 let filamentosRows = [];
 let insumosRows = [];
@@ -633,13 +634,16 @@ window.limparFormTrabalho = function() {
   editTrabalhoId=null;
   document.getElementById('formTrabalhoTitle').textContent='Novo Trabalho';
   ['tj-nome','tj-cliente','tj-obs'].forEach(f => document.getElementById(f).value='');
-  ['tj-tempo-h','tj-tempo-m','tj-falha','tj-pos','tj-frete','tj-preco-venda','tj-marketplace'].forEach(f => document.getElementById(f).value='');
+  ['tj-tempo-h','tj-tempo-m','tj-falha','tj-pos','tj-frete','tj-preco-venda','tj-marketplace','tj-atacado-qtd'].forEach(f => document.getElementById(f).value='');
   document.getElementById('tj-data').value=new Date().toISOString().split('T')[0];
   document.getElementById('tj-status').value='Pendente';
   document.getElementById('tj-margem').value=DB.config.margemPadrao;
   document.getElementById('margemLabel').textContent=DB.config.margemPadrao;
   taxToggleOn=false;
   document.getElementById('taxToggle').className='toggle';
+  atacadoOn=false;
+  document.getElementById('atacadoToggle').className='toggle';
+  document.getElementById('atacadoQtdField').style.display='none';
   filamentosRows=[]; insumosRows=[];
   renderFilamentosRows(); renderInsumosRows();
   populateImpressoraDropdown('tj-impressora');
@@ -750,6 +754,14 @@ window.toggleTax = function() {
   calcTrabalho();
 };
 
+window.toggleAtacado = function() {
+  atacadoOn=!atacadoOn;
+  document.getElementById('atacadoToggle').className='toggle'+(atacadoOn?' on':'');
+  document.getElementById('atacadoQtdField').style.display=atacadoOn?'':'none';
+  if(atacadoOn && !document.getElementById('tj-atacado-qtd').value) document.getElementById('tj-atacado-qtd').value=1;
+  calcTrabalho();
+};
+
 window.calcTrabalho = function() {
   const h=parseFloat(document.getElementById('tj-tempo-h').value)||0;
   const m=parseFloat(document.getElementById('tj-tempo-m').value)||0;
@@ -761,31 +773,38 @@ window.calcTrabalho = function() {
   const margem=(parseFloat(document.getElementById('tj-margem').value)||40)/100;
   const impId=document.getElementById('tj-impressora').value;
   const imp=DB.impressoras.find(x=>x.id===impId);
+  const qtd=atacadoOn?Math.max(1,parseInt(document.getElementById('tj-atacado-qtd').value)||1):1;
   const custoFil=filamentosRows.reduce((a,r)=>a+calcFilCost(r)*(1+falha),0);
   const custoIns=insumosRows.reduce((a,r)=>a+calcInsCost(r),0);
   const custoElet=imp?imp.custEletricoH*totalH:0;
   const custoDepr=imp?imp.depreciacaoPorH*totalH:0;
   const custoMao=DB.config.maoDeObra*(posMin/60);
-  const custoTotal=custoFil+custoIns+custoElet+custoDepr+custoMao+frete;
+  const custoUnitario=custoFil+custoIns+custoElet+custoDepr+custoMao;
+  const custoTotal=custoUnitario*qtd+frete;
   const precoMargem=margem<1?custoTotal/(1-margem):custoTotal*2;
   const precoMkt=marketplace>0?precoMargem/(1-marketplace):precoMargem;
   const taxa=taxToggleOn?DB.config.impostoTaxa/100:0;
   const precoFinal=precoMkt*(1+taxa);
+  const precoUnitario=precoFinal/qtd;
+  const suf=qtd>1?' (unid.)':'';
   document.getElementById('breakdownTrabalho').innerHTML=`
-    <div class="breakdown-row"><span>Filamentos</span><span class="mono">${fmt(custoFil)}</span></div>
-    <div class="breakdown-row"><span>Insumos</span><span class="mono">${fmt(custoIns)}</span></div>
-    <div class="breakdown-row"><span>Eletricidade</span><span class="mono">${fmt(custoElet)}</span></div>
-    <div class="breakdown-row"><span>Depreciação</span><span class="mono">${fmt(custoDepr)}</span></div>
-    <div class="breakdown-row"><span>Mão de Obra</span><span class="mono">${fmt(custoMao)}</span></div>
-    <div class="breakdown-row"><span>Frete</span><span class="mono">${fmt(frete)}</span></div>
-    <div class="breakdown-row total"><span>CUSTO TOTAL</span><span class="mono">${fmt(custoTotal)}</span></div>`;
+    <div class="breakdown-row"><span>Filamentos${suf}</span><span class="mono">${fmt(custoFil)}</span></div>
+    <div class="breakdown-row"><span>Insumos${suf}</span><span class="mono">${fmt(custoIns)}</span></div>
+    <div class="breakdown-row"><span>Eletricidade${suf}</span><span class="mono">${fmt(custoElet)}</span></div>
+    <div class="breakdown-row"><span>Depreciação${suf}</span><span class="mono">${fmt(custoDepr)}</span></div>
+    <div class="breakdown-row"><span>Mão de Obra${suf}</span><span class="mono">${fmt(custoMao)}</span></div>
+    ${qtd>1?`<div class="breakdown-row"><span>Custo Unitário</span><span class="mono">${fmt(custoUnitario)}</span></div>
+    <div class="breakdown-row"><span>Quantidade (Atacado)</span><span class="mono">× ${qtd}</span></div>`:''}
+    <div class="breakdown-row"><span>Frete${qtd>1?' (total do lote)':''}</span><span class="mono">${fmt(frete)}</span></div>
+    <div class="breakdown-row total"><span>CUSTO TOTAL${qtd>1?' (LOTE)':''}</span><span class="mono">${fmt(custoTotal)}</span></div>`;
   document.getElementById('precoResult').innerHTML=`
     <div class="breakdown-row"><span>Break-even</span><span class="mono">${fmt(custoTotal)}</span></div>
     <div class="breakdown-row"><span>Com margem (${Math.round(margem*100)}%)</span><span class="mono">${fmt(precoMargem)}</span></div>
     ${marketplace>0?`<div class="breakdown-row"><span>Com marketplace</span><span class="mono">${fmt(precoMkt)}</span></div>`:''}
     ${taxToggleOn?`<div class="breakdown-row"><span>Com ${DB.config.impostoNome} (${DB.config.impostoTaxa}%)</span><span class="mono">${fmt(precoFinal)}</span></div>`:''}
-    <div class="breakdown-row total"><span>PREÇO SUGERIDO</span><span class="mono text-orange">${fmt(precoFinal)}</span></div>`;
-  return {custoTotal,precoFinal};
+    <div class="breakdown-row total"><span>PREÇO SUGERIDO${qtd>1?' (LOTE)':''}</span><span class="mono text-orange">${fmt(precoFinal)}</span></div>
+    ${qtd>1?`<div class="breakdown-row"><span>Preço Sugerido / Unidade</span><span class="mono text-orange">${fmt(precoUnitario)}</span></div>`:''}`;
+  return {custoTotal,precoFinal,custoUnitario,precoUnitario,qtd,atacado:atacadoOn};
 };
 
 window.salvarTrabalho = async function() {
@@ -806,17 +825,24 @@ window.salvarTrabalho = async function() {
     margem:parseFloat(document.getElementById('tj-margem').value)||40,
     obs:document.getElementById('tj-obs').value,
     status:document.getElementById('tj-status').value,
+    atacado:calc.atacado,
+    quantidadeAtacado:calc.qtd,
+    custoUnitario:calc.custoUnitario,
+    precoUnitario:calc.precoUnitario,
     custoTotal:calc.custoTotal,
     precoVenda:parseFloat(document.getElementById('tj-preco-venda').value)||calc.precoFinal,
     filamentos:filamentosRows.map(r=>({...r})),
     insumos:insumosRows.map(r=>({...r}))
   };
+  const oldTrab=editTrabalhoId?DB.trabalhos.find(t=>t.id===editTrabalhoId):null;
+  const oldQtd=oldTrab?(oldTrab.quantidadeAtacado||1):1;
   insumosRows.forEach(r=>{
     const ins=DB.insumos.find(x=>x.id===r.insId);
     if(ins){
-      const oldTrab=editTrabalhoId?DB.trabalhos.find(t=>t.id===editTrabalhoId):null;
       const oldRow=oldTrab?oldTrab.insumos?.find(x=>x.insId===r.insId):null;
-      const diff=(r.qtd||0)-(oldRow?oldRow.qtd||0:0);
+      const consumido=(r.qtd||0)*calc.qtd;
+      const consumidoAntes=oldRow?(oldRow.qtd||0)*oldQtd:0;
+      const diff=consumido-consumidoAntes;
       ins.estoque=Math.max(0,ins.estoque-diff);
       saveItem('insumos',ins);
     }
@@ -847,6 +873,10 @@ window.editarTrabalho = function(id) {
   document.getElementById('tj-status').value=t.status||'Pendente';
   document.getElementById('tj-obs').value=t.obs||'';
   document.getElementById('tj-preco-venda').value=t.precoVenda||'';
+  atacadoOn=!!t.atacado;
+  document.getElementById('atacadoToggle').className='toggle'+(atacadoOn?' on':'');
+  document.getElementById('atacadoQtdField').style.display=atacadoOn?'':'none';
+  document.getElementById('tj-atacado-qtd').value=t.quantidadeAtacado||1;
   populateImpressoraDropdown('tj-impressora');
   document.getElementById('tj-impressora').value=t.impressoraId||'';
   filamentosRows=(t.filamentos||[]).map(r=>({...r}));
@@ -866,13 +896,15 @@ function renderTrabalhos() {
   const list=filtro?DB.trabalhos.filter(t=>t.status===filtro):DB.trabalhos;
   const tb=document.getElementById('tabelaTrabalhos');
   if(!list.length){
-    tb.innerHTML=`<tr><td colspan="8"><div class="empty"><div class="empty-icon"><i data-lucide="briefcase" class="icon"></i></div><div class="empty-text">Nenhum trabalho encontrado</div></div></td></tr>`; refreshIcons(); return;
+    tb.innerHTML=`<tr><td colspan="9"><div class="empty"><div class="empty-icon"><i data-lucide="briefcase" class="icon"></i></div><div class="empty-text">Nenhum trabalho encontrado</div></div></td></tr>`; refreshIcons(); return;
   }
   const sc={Pendente:'badge-yellow','Em andamento':'badge-blue',Concluído:'badge-green',Entregue:'badge-gray'};
   tb.innerHTML=[...list].reverse().map(t=>{
     const lucro=(t.precoVenda||0)-(t.custoTotal||0);
+    const qtd=t.quantidadeAtacado||1;
     return `<tr>
       <td><strong>${t.nome}</strong></td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td>
+      <td>${t.atacado?`<span class="badge badge-blue">Atacado × ${qtd}</span>`:'—'}</td>
       <td class="mono">${fmt(t.custoTotal)}</td><td class="mono">${fmt(t.precoVenda)}</td>
       <td class="mono ${lucro>=0?'stock-ok':'stock-low'}">${fmt(lucro)}</td>
       <td><span class="badge ${sc[t.status]||'badge-gray'}">${t.status}</span></td>
@@ -1097,8 +1129,8 @@ window.previewRelatorio = function() {
   let html='';
   if(tipo==='trabalhos'){
     html=`<div class="table-wrap"><table>
-      <thead><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th></tr></thead>
-      <tbody>${trab.map(t=>`<tr><td>${t.nome}</td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td><td class="mono">${fmt(t.custoTotal)}</td><td class="mono">${fmt(t.precoVenda)}</td><td class="mono">${fmt((t.precoVenda||0)-(t.custoTotal||0))}</td><td>${t.status}</td></tr>`).join('')}</tbody>
+      <thead><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Qtd</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th></tr></thead>
+      <tbody>${trab.map(t=>`<tr><td>${t.nome}</td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td><td>${t.atacado?('Atacado × '+(t.quantidadeAtacado||1)):'—'}</td><td class="mono">${fmt(t.custoTotal)}</td><td class="mono">${fmt(t.precoVenda)}</td><td class="mono">${fmt((t.precoVenda||0)-(t.custoTotal||0))}</td><td>${t.status}</td></tr>`).join('')}</tbody>
     </table></div>`;
   } else if(tipo==='materiais'){
     html=`<p style="margin-bottom:12px;font-weight:600">Filamentos</p>
@@ -1129,8 +1161,8 @@ window.exportExcel = function() {
   const trab=getRelTrabalhos();
   const wb=XLSX.utils.book_new();
   if(tipo==='trabalhos'||tipo==='financeiro'){
-    const data=[['Trabalho','Cliente','Data','Custo','Venda','Lucro','Status'],
-      ...trab.map(t=>[t.nome,t.cliente||'',t.data||'',t.custoTotal||0,t.precoVenda||0,(t.precoVenda||0)-(t.custoTotal||0),t.status])];
+    const data=[['Trabalho','Cliente','Data','Atacado','Qtd','Custo','Venda','Lucro','Status'],
+      ...trab.map(t=>[t.nome,t.cliente||'',t.data||'',t.atacado?'Sim':'Não',t.quantidadeAtacado||1,t.custoTotal||0,t.precoVenda||0,(t.precoVenda||0)-(t.custoTotal||0),t.status])];
     XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(data),'Trabalhos');
   }
   if(tipo==='materiais'){
@@ -1147,8 +1179,8 @@ window.exportPDF = function() {
   let tableHTML='';
   if(tipo==='trabalhos'){
     tableHTML=`<table border="1" style="width:100%;border-collapse:collapse;font-size:12px">
-      <thead style="background:#f0f0f0"><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th></tr></thead>
-      <tbody>${trab.map(t=>`<tr><td>${t.nome}</td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td><td>${fmt(t.custoTotal)}</td><td>${fmt(t.precoVenda)}</td><td>${fmt((t.precoVenda||0)-(t.custoTotal||0))}</td><td>${t.status}</td></tr>`).join('')}</tbody></table>`;
+      <thead style="background:#f0f0f0"><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Qtd</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th></tr></thead>
+      <tbody>${trab.map(t=>`<tr><td>${t.nome}</td><td>${t.cliente||'—'}</td><td>${t.data||'—'}</td><td>${t.atacado?('Atacado × '+(t.quantidadeAtacado||1)):'—'}</td><td>${fmt(t.custoTotal)}</td><td>${fmt(t.precoVenda)}</td><td>${fmt((t.precoVenda||0)-(t.custoTotal||0))}</td><td>${t.status}</td></tr>`).join('')}</tbody></table>`;
   } else if(tipo==='materiais'){
     tableHTML=`<h3>Filamentos</h3><table border="1" style="width:100%;border-collapse:collapse;font-size:12px">
       <thead style="background:#f0f0f0"><tr><th>Nome</th><th>Tipo</th><th>Preço</th><th>Custo/g</th><th>Estoque</th></tr></thead>
@@ -1721,7 +1753,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
           </div>
           <div class="section-body" style="padding:0">
             <div class="table-wrap"><table>
-              <thead><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th>Trabalho</th><th>Cliente</th><th>Data</th><th>Qtd</th><th>Custo</th><th>Venda</th><th>Lucro</th><th>Status</th><th></th></tr></thead>
               <tbody id="tabelaTrabalhos"></tbody>
             </table></div>
           </div>
@@ -1745,6 +1777,17 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
               <div class="field"><label>Custo de Frete</label><input type="number" id="tj-frete" min="0" step="0.01" placeholder="0.00" oninput="calcTrabalho()"></div>
               <div class="field"><label>Status</label>
                 <select id="tj-status"><option>Pendente</option><option>Em andamento</option><option>Concluído</option><option>Entregue</option></select>
+              </div>
+              <div class="field">
+                <label>&nbsp;</label>
+                <div class="toggle-wrap" onclick="toggleAtacado()">
+                  <div class="toggle" id="atacadoToggle"></div>
+                  <span class="toggle-label" id="atacadoToggleLabel">Venda no Atacado</span>
+                </div>
+              </div>
+              <div class="field" id="atacadoQtdField" style="display:none">
+                <label>Quantidade (unidades)</label>
+                <input type="number" id="tj-atacado-qtd" min="1" step="1" placeholder="1" oninput="calcTrabalho()">
               </div>
               <div class="field form-full"><label>Observações</label><textarea id="tj-obs" placeholder="Notas adicionais..."></textarea></div>
             </div>

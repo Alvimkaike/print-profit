@@ -679,30 +679,43 @@ function renderFilamentosRows() {
     const corBg=r.cor&&CSS.supports('color',r.cor)?r.cor:'#888';
     return `<div class="fil-card">
       <div class="fil-card-header">
-        <span><span class="fil-dot" style="background:${corBg}"></span><strong>Filamento</strong></span>
+        <span><span class="fil-dot" id="filDot-${r.id}" style="background:${corBg}"></span><strong>Filamento</strong></span>
         <button class="btn btn-danger btn-sm btn-icon" onclick="removeFilamentoRow('${r.id}')"><i data-lucide="x" class="icon"></i></button>
       </div>
       <div class="form-grid-3">
         <div class="field"><label>Material</label>
-          <select onchange="updateFilRow('${r.id}','filId',this.value);calcTrabalho()">
+          <select onchange="updateFilRow('${r.id}','filId',this.value)">
             <option value="">Selecionar...</option>
             ${DB.filamentos.map(f=>`<option value="${f.id}" ${f.id===r.filId?'selected':''}>${f.nome} (${f.tipo})</option>`).join('')}
           </select></div>
         <div class="field"><label>Cor</label>
-          <input type="text" value="${r.cor}" placeholder="Ex: Vermelho" oninput="updateFilRow('${r.id}','cor',this.value)"></div>
+          <input type="text" value="${r.cor}" placeholder="Ex: Vermelho" oninput="updateFilRow('${r.id}','cor',this.value,true)"></div>
         <div class="field"><label>Peso (g)</label>
-          <input type="number" value="${r.peso||''}" placeholder="0" min="0" step="0.1" oninput="updateFilRow('${r.id}','peso',parseFloat(this.value)||0);calcTrabalho()"></div>
+          <input type="number" value="${r.peso||''}" placeholder="0" min="0" step="0.1" oninput="updateFilRow('${r.id}','peso',parseFloat(this.value)||0,true)"></div>
       </div>
       <div class="breakdown-row" style="margin-top:8px">
         <span>Custo estimado</span>
-        <span class="mono text-orange">${fmt(calcFilCost(r))}</span>
+        <span class="mono text-orange" id="filCost-${r.id}">${fmt(calcFilCost(r))}</span>
       </div></div>`;
   }).join('');
   refreshIcons();
 }
-window.updateFilRow = function(id,field,val) {
+window.updateFilRow = function(id,field,val,silent) {
   const r=filamentosRows.find(x=>x.id===id);
-  if(r){r[field]=val;renderFilamentosRows();calcTrabalho();}
+  if(!r)return;
+  r[field]=val;
+  if(silent){
+    const costEl=document.getElementById('filCost-'+id);
+    if(costEl)costEl.textContent=fmt(calcFilCost(r));
+    if(field==='cor'){
+      const dot=document.getElementById('filDot-'+id);
+      if(dot)dot.style.background=(r.cor&&CSS.supports('color',r.cor))?r.cor:'#888';
+    }
+    calcTrabalho();
+  } else {
+    renderFilamentosRows();
+    calcTrabalho();
+  }
 };
 
 window.addInsumoRow = function() {
@@ -730,22 +743,31 @@ function renderInsumosRows() {
       </div>
       <div class="form-grid">
         <div class="field"><label>Insumo</label>
-          <select onchange="updateInsRow('${r.id}','insId',this.value);calcTrabalho()">
+          <select onchange="updateInsRow('${r.id}','insId',this.value)">
             <option value="">Selecionar...</option>
             ${DB.insumos.map(i=>`<option value="${i.id}" ${i.id===r.insId?'selected':''}>${i.nome} (${fmt(i.custoUn)}/${i.unidade})</option>`).join('')}
           </select></div>
         <div class="field"><label>Quantidade</label>
-          <input type="number" value="${r.qtd||1}" min="0.01" step="0.01" oninput="updateInsRow('${r.id}','qtd',parseFloat(this.value)||0);calcTrabalho()"></div>
+          <input type="number" value="${r.qtd||1}" min="0.01" step="0.01" oninput="updateInsRow('${r.id}','qtd',parseFloat(this.value)||0,true)"></div>
       </div>
       <div class="breakdown-row" style="margin-top:8px">
         <span>Custo estimado</span>
-        <span class="mono text-orange">${fmt(calcInsCost(r))}</span>
+        <span class="mono text-orange" id="insCost-${r.id}">${fmt(calcInsCost(r))}</span>
       </div></div>`).join('');
   refreshIcons();
 }
-window.updateInsRow = function(id,field,val) {
+window.updateInsRow = function(id,field,val,silent) {
   const r=insumosRows.find(x=>x.id===id);
-  if(r){r[field]=val;renderInsumosRows();calcTrabalho();}
+  if(!r)return;
+  r[field]=val;
+  if(silent){
+    const costEl=document.getElementById('insCost-'+id);
+    if(costEl)costEl.textContent=fmt(calcInsCost(r));
+    calcTrabalho();
+  } else {
+    renderInsumosRows();
+    calcTrabalho();
+  }
 };
 
 window.toggleTax = function() {

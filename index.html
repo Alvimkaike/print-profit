@@ -630,6 +630,10 @@ function renderImpressoras() {
 }
 
 // ── NOVO TRABALHO ──
+window.novoTrabalho = function() {
+  editTrabalhoId=null;
+  goTo('novo-trabalho');
+};
 window.limparFormTrabalho = function() {
   editTrabalhoId=null;
   document.getElementById('formTrabalhoTitle').textContent='Novo Trabalho';
@@ -872,6 +876,7 @@ window.salvarTrabalho = async function() {
   const idx=DB.trabalhos.findIndex(x=>x.id===obj.id);
   if(idx>=0)DB.trabalhos[idx]=obj; else DB.trabalhos.push(obj);
   await saveItem('trabalhos',obj);
+  editTrabalhoId=null;
   toast('Trabalho salvo!'); goTo('trabalhos');
 };
 
@@ -1109,7 +1114,7 @@ window.limparCalc = function() {
   calcTaxOn=false; document.getElementById('calcTaxToggle').className='toggle'; calcCalc();
 };
 window.salvarComoTrabalho = function() {
-  goTo('novo-trabalho');
+  novoTrabalho();
   document.getElementById('tj-tempo-h').value=document.getElementById('c-tempo-h').value;
   document.getElementById('tj-tempo-m').value=document.getElementById('c-tempo-m').value;
   document.getElementById('tj-frete').value=document.getElementById('c-frete').value;
@@ -1699,7 +1704,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
     <nav>
       <div class="nav-item" data-page="dashboard" onclick="goTo('dashboard')"><span class="nav-icon"><i data-lucide="layout-dashboard" class="icon-sm"></i></span> Dashboard</div>
       <div class="nav-item" data-page="trabalhos" onclick="goTo('trabalhos')"><span class="nav-icon"><i data-lucide="briefcase" class="icon-sm"></i></span> Trabalhos</div>
-      <div class="nav-item" data-page="novo-trabalho" onclick="goTo('novo-trabalho')"><span class="nav-icon"><i data-lucide="file-plus" class="icon-sm"></i></span> Novo Trabalho</div>
+      <div class="nav-item" data-page="novo-trabalho" onclick="novoTrabalho()"><span class="nav-icon"><i data-lucide="file-plus" class="icon-sm"></i></span> Novo Trabalho</div>
       <div class="nav-item" data-page="calculadora" onclick="goTo('calculadora')"><span class="nav-icon"><i data-lucide="calculator" class="icon-sm"></i></span> Calculadora</div>
       <div class="nav-item" data-page="materiais" onclick="goTo('materiais')"><span class="nav-icon"><i data-lucide="layers" class="icon-sm"></i></span> Materiais<span class="nav-badge" id="badge-materiais" style="display:none">!</span></div>
       <div class="nav-item" data-page="insumos" onclick="goTo('insumos')"><span class="nav-icon"><i data-lucide="package" class="icon-sm"></i></span> Insumos<span class="nav-badge" id="badge-insumos" style="display:none">!</span></div>
@@ -1770,7 +1775,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
                 <option>Pendente</option><option>Em andamento</option>
                 <option>Concluído</option><option>Entregue</option>
               </select>
-              <button class="btn btn-primary btn-sm" onclick="goTo('novo-trabalho')">+ Novo</button>
+              <button class="btn btn-primary btn-sm" onclick="novoTrabalho()">+ Novo</button>
             </div>
           </div>
           <div class="section-body" style="padding:0">
